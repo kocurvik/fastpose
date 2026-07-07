@@ -1150,95 +1150,143 @@ _COEFF_TERM_C = np.array((
 
 
 
+# fixed orthogonal basis mixing for the 6-point nullspace: the elimination
+# basis is triangular in the free columns 6..8, and PoseLib's generated
+# template is only valid for generic nullspace coefficients - the structural
+# zeros make its 31x31 elimination matrix exactly singular. Any fixed dense
+# rotation restores genericity while keeping the basis orthonormal.
+_MIX_00 = -0.7150201912836258
+_MIX_01 = 0.6386751515262354
+_MIX_02 = -0.28432407017287076
+_MIX_10 = -0.13015229489139124
+_MIX_11 = -0.5211971496803828
+_MIX_12 = -0.8434535620290836
+_MIX_20 = -0.6868817264938932
+_MIX_21 = -0.5660808970350308
+_MIX_22 = 0.45579152232219433
+
+
 @njit(cache=True, fastmath=True)
 def _nullspace_6pt(A, N):
-    # 3-dimensional nullspace of the 6x9 epipolar system. The resulting N is
-    # stored as rows, matching the local 5-point nullspace convention.
-    U, s, Vt = np.linalg.svd(A)
-    for r in range(3):
+    # 3-dimensional nullspace of the 6x9 epipolar system via Gaussian
+    # elimination (pivots on columns 0..5, free variables 6..8), modified
+    # Gram-Schmidt and a fixed dense rotation of the basis (no LAPACK SVD).
+    # The resulting N is stored as rows.
+    for col in range(6):
+        piv = col
+        max_val = abs(A[col, col])
+        for r in range(col + 1, 6):
+            v = abs(A[r, col])
+            if v > max_val:
+                max_val = v
+                piv = r
+        if max_val < 1e-12:
+            return False
+        if piv != col:
+            for c in range(col, 9):
+                t = A[col, c]
+                A[col, c] = A[piv, c]
+                A[piv, c] = t
+        inv = 1.0 / A[col, col]
+        for r in range(col + 1, 6):
+            factor = A[r, col] * inv
+            if factor != 0.0:
+                A[r, col] = 0.0
+                for c in range(col + 1, 9):
+                    A[r, c] -= factor * A[col, c]
+
+    for b in range(3):
+        free_col = 6 + b
+        for j in range(9):
+            N[b, j] = 0.0
+        N[b, free_col] = 1.0
+        for r in range(5, -1, -1):
+            s = A[r, free_col]
+            for c in range(r + 1, 6):
+                s += A[r, c] * N[b, c]
+            N[b, r] = -s / A[r, r]
+
+    for b in range(3):
+        for k in range(b):
+            dot = 0.0
+            for j in range(9):
+                dot += N[b, j] * N[k, j]
+            for j in range(9):
+                N[b, j] -= dot * N[k, j]
         norm = 0.0
-        for c in range(9):
-            v = Vt[6 + r, c]
-            N[r, c] = v
-            norm += v * v
+        for j in range(9):
+            norm += N[b, j] * N[b, j]
         if norm < 1e-24:
             return False
         inv = 1.0 / math.sqrt(norm)
-        for c in range(9):
-            N[r, c] *= inv
+        for j in range(9):
+            N[b, j] *= inv
+
+    for j in range(9):
+        v0 = N[0, j]
+        v1 = N[1, j]
+        v2 = N[2, j]
+        N[0, j] = _MIX_00 * v0 + _MIX_01 * v1 + _MIX_02 * v2
+        N[1, j] = _MIX_10 * v0 + _MIX_11 * v1 + _MIX_12 * v2
+        N[2, j] = _MIX_20 * v0 + _MIX_21 * v1 + _MIX_22 * v2
     return True
 
 
 @njit(cache=True, fastmath=True)
 def _fill_coeffs(d, coeffs):
+    # every term is a factor times a product of exactly three entries of d
     for ci in range(280):
-        coeffs[ci] = 0.0
-    for ci in range(280):
+        acc = 0.0
         for ti in range(_COEFF_TERM_START[ci], _COEFF_TERM_START[ci + 1]):
-            v = _COEFF_TERM_FACTOR[ti]
-            ia = _COEFF_TERM_A[ti]
-            if ia >= 0:
-                v *= d[ia]
-            ib = _COEFF_TERM_B[ti]
-            if ib >= 0:
-                v *= d[ib]
-            ic = _COEFF_TERM_C[ti]
-            if ic >= 0:
-                v *= d[ic]
-            coeffs[ci] += v
+            acc += (_COEFF_TERM_FACTOR[ti] * d[_COEFF_TERM_A[ti]]
+                    * d[_COEFF_TERM_B[ti]] * d[_COEFF_TERM_C[ti]])
+        coeffs[ci] = acc
 
 
 @njit(cache=True, fastmath=True)
-def _solve_linear_31x15(C0, C1, C12):
-    # C12 <- C0^-1 C1 via Gaussian elimination with partial pivoting.
+def _solve_linear_31x15(C, C12):
+    # C12 <- C0^-1 C1 for the augmented matrix C = [C0 | C1] (31, 46), via
+    # Gaussian elimination with partial pivoting; the augmented layout keeps
+    # the row operations in one contiguous inner loop
     n = 31
     m = 15
     scale = 0.0
     for r in range(n):
         for c in range(n):
-            v = abs(C0[r, c])
+            v = abs(C[r, c])
             if v > scale:
                 scale = v
     if scale == 0.0:
         return False
     tol = 1e-12 * scale
-    for r in range(n):
-        for c in range(m):
-            C12[r, c] = C1[r, c]
     for col in range(n):
         piv = col
-        max_val = abs(C0[col, col])
+        max_val = abs(C[col, col])
         for r in range(col + 1, n):
-            v = abs(C0[r, col])
+            v = abs(C[r, col])
             if v > max_val:
                 max_val = v
                 piv = r
         if max_val < tol:
             return False
         if piv != col:
-            for c in range(col, n):
-                t = C0[col, c]
-                C0[col, c] = C0[piv, c]
-                C0[piv, c] = t
-            for c in range(m):
-                t = C12[col, c]
-                C12[col, c] = C12[piv, c]
-                C12[piv, c] = t
-        inv = 1.0 / C0[col, col]
+            for c in range(col, n + m):
+                t = C[col, c]
+                C[col, c] = C[piv, c]
+                C[piv, c] = t
+        inv = 1.0 / C[col, col]
         for r in range(col + 1, n):
-            factor = C0[r, col] * inv
+            factor = C[r, col] * inv
             if factor != 0.0:
-                C0[r, col] = 0.0
-                for c in range(col + 1, n):
-                    C0[r, c] -= factor * C0[col, c]
-                for c in range(m):
-                    C12[r, c] -= factor * C12[col, c]
+                C[r, col] = 0.0
+                for c in range(col + 1, n + m):
+                    C[r, c] -= factor * C[col, c]
     for r in range(n - 1, -1, -1):
-        inv = 1.0 / C0[r, r]
+        inv = 1.0 / C[r, r]
         for c in range(m):
-            s = C12[r, c]
+            s = C[r, n + c]
             for k in range(r + 1, n):
-                s -= C0[r, k] * C12[k, c]
+                s -= C[r, k] * C12[k, c]
             C12[r, c] = s * inv
     return True
 
@@ -1338,18 +1386,14 @@ def _solve_7x7(A, b, x):
 
 
 @njit(cache=True, fastmath=True)
-def _fast_eigenvector_solution(lam, AM, sol):
+def _fast_eigenvector_solution(lam, AM, sol, A, b, x, vals):
+    # A (7, 7), b (7), x (7) and vals (8) are caller-provided scratch
     ind = (2, 3, 4, 6, 8, 9, 11, 14)
-    A = np.empty((7, 7))
-    b = np.empty(7)
-    x = np.empty(7)
     z0 = lam
     z1 = z0 * z0
     z2 = z1 * z0
     for ii in range(8):
         row = ind[ii]
-        cols = (2, 6, -1, -2, 14, -3, -4, -5)
-        vals = np.empty(8)
         vals[0] = AM[row, 2]
         vals[1] = AM[row, 6]
         vals[2] = z0 * AM[row, 4] + AM[row, 5]
@@ -1391,10 +1435,8 @@ def _solver_shared_focal_relpose_6pt(d, sols, workspace):
     o = 0
     coeffs = workspace[o:o + 280]
     o += 280
-    C0 = workspace[o:o + 961].reshape(31, 31)
-    o += 961
-    C1 = workspace[o:o + 465].reshape(31, 15)
-    o += 465
+    C = workspace[o:o + 1426].reshape(31, 46)
+    o += 1426
     C12 = workspace[o:o + 465].reshape(31, 15)
     o += 465
     RR = workspace[o:o + 345].reshape(23, 15)
@@ -1417,20 +1459,26 @@ def _solver_shared_focal_relpose_6pt(d, sols, workspace):
     o += 64
     hi_stack = workspace[o:o + 64]
     o += 64
+    A7 = workspace[o:o + 49].reshape(7, 7)
+    o += 49
+    b7 = workspace[o:o + 7]
+    o += 7
+    x7 = workspace[o:o + 7]
+    o += 7
+    vals = workspace[o:o + 8]
+    o += 8
 
     _fill_coeffs(d, coeffs)
     for r in range(31):
-        for c in range(31):
-            C0[r, c] = 0.0
-        for c in range(15):
-            C1[r, c] = 0.0
+        for c in range(46):
+            C[r, c] = 0.0
     for i in range(556):
         idx = _C0_IND[i]
-        C0[idx % 31, idx // 31] = coeffs[_COEFFS0_IND[i]]
+        C[idx % 31, idx // 31] = coeffs[_COEFFS0_IND[i]]
     for i in range(258):
         idx = _C1_IND[i]
-        C1[idx % 31, idx // 31] = coeffs[_COEFFS1_IND[i]]
-    if not _solve_linear_31x15(C0, C1, C12):
+        C[idx % 31, 31 + idx // 31] = coeffs[_COEFFS1_IND[i]]
+    if not _solve_linear_31x15(C, C12):
         return 0
 
     for r in range(8):
@@ -1456,7 +1504,7 @@ def _solver_shared_focal_relpose_6pt(d, sols, workspace):
     count = 0
     sol = np.empty(3)
     for i in range(n_roots):
-        if _fast_eigenvector_solution(roots[i], AM, sol):
+        if _fast_eigenvector_solution(roots[i], AM, sol, A7, b7, x7, vals):
             sols[count, 0] = sol[0]
             sols[count, 1] = sol[1]
             sols[count, 2] = sol[2]
@@ -1559,5 +1607,5 @@ class SixPointSharedFocalSolver():
     sample_size = 6
     num_params = MODEL_SIZE
     max_models = 15
-    workspace_size = 3591
+    workspace_size = 3662
     solve = staticmethod(_solve_shared_focal_6pt)

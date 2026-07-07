@@ -9,6 +9,8 @@ a 3Q3 system (three quadrics in three unknowns). The 3Q3 solver eliminates
 the best-conditioned variable, reduces to the degree-8 determinant
 polynomial of the resulting 3x3 system and brackets its real roots with the
 shared Sturm machinery from the 5-point solver, followed by Newton polish.
+The nullspace is computed by Gaussian elimination + modified Gram-Schmidt
+like in the 5-point solver (no LAPACK SVD).
 
 Like poselib with filter_solutions=true, candidate poses are
 cheirality-checked on the sample and the solution whose row norms are most
@@ -31,7 +33,7 @@ from solvers.essential import _real_roots_sturm
 MODEL_SIZE = 13
 
 
-@njit(cache=True, inline='always')
+@njit(cache=True, inline='always', fastmath=True)
 def _det3_cols(c, j0, j1, j2):
     # determinant of the 3x3 matrix [c[:, j0] | c[:, j1] | c[:, j2]]
     return (c[0, j0] * (c[1, j1] * c[2, j2] - c[1, j2] * c[2, j1])
@@ -39,7 +41,7 @@ def _det3_cols(c, j0, j1, j2):
             + c[0, j2] * (c[1, j0] * c[2, j1] - c[1, j1] * c[2, j0]))
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def _solve_3xn_neg(A, P, n):
     # P[:, :n] <- -A^{-1} P[:, :n] in place (Gaussian elimination with
     # partial pivoting); False only for an exactly singular pivot
@@ -81,7 +83,7 @@ def _solve_3xn_neg(A, P, n):
     return True
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def _refine_3q3(coeffs, solutions, n_sols):
     # a few Newton steps on the three quadrics; monomial order is
     # [x^2, xy, xz, y^2, yz, z^2, x, y, z, 1]
@@ -90,25 +92,22 @@ def _refine_3q3(coeffs, solutions, n_sols):
         y = solutions[1, i]
         z = solutions[2, i]
         for _ in range(5):
-            max_r = 0.0
-            r0 = 0.0
-            r1 = 0.0
-            r2 = 0.0
-            for k in range(3):
-                r = (coeffs[k, 0] * x * x + coeffs[k, 1] * x * y
-                     + coeffs[k, 2] * x * z + coeffs[k, 3] * y * y
-                     + coeffs[k, 4] * y * z + coeffs[k, 5] * z * z
-                     + coeffs[k, 6] * x + coeffs[k, 7] * y
-                     + coeffs[k, 8] * z + coeffs[k, 9])
-                if k == 0:
-                    r0 = r
-                elif k == 1:
-                    r1 = r
-                else:
-                    r2 = r
-                if abs(r) > max_r:
-                    max_r = abs(r)
-            if max_r < 1e-8:
+            r0 = (coeffs[0, 0] * x * x + coeffs[0, 1] * x * y
+                  + coeffs[0, 2] * x * z + coeffs[0, 3] * y * y
+                  + coeffs[0, 4] * y * z + coeffs[0, 5] * z * z
+                  + coeffs[0, 6] * x + coeffs[0, 7] * y
+                  + coeffs[0, 8] * z + coeffs[0, 9])
+            r1 = (coeffs[1, 0] * x * x + coeffs[1, 1] * x * y
+                  + coeffs[1, 2] * x * z + coeffs[1, 3] * y * y
+                  + coeffs[1, 4] * y * z + coeffs[1, 5] * z * z
+                  + coeffs[1, 6] * x + coeffs[1, 7] * y
+                  + coeffs[1, 8] * z + coeffs[1, 9])
+            r2 = (coeffs[2, 0] * x * x + coeffs[2, 1] * x * y
+                  + coeffs[2, 2] * x * z + coeffs[2, 3] * y * y
+                  + coeffs[2, 4] * y * z + coeffs[2, 5] * z * z
+                  + coeffs[2, 6] * x + coeffs[2, 7] * y
+                  + coeffs[2, 8] * z + coeffs[2, 9])
+            if max(abs(r0), abs(r1), abs(r2)) < 1e-8:
                 break
             j00 = 2.0 * coeffs[0, 0] * x + coeffs[0, 1] * y + coeffs[0, 2] * z + coeffs[0, 6]
             j01 = coeffs[0, 1] * x + 2.0 * coeffs[0, 3] * y + coeffs[0, 4] * z + coeffs[0, 7]
@@ -142,11 +141,20 @@ def _refine_3q3(coeffs, solutions, n_sols):
         solutions[2, i] = z
 
 
-@njit(cache=True)
-def _re3q3(coeffs, solutions):
+@njit(cache=True, fastmath=True)
+def _re3q3(coeffs, solutions, scratch):
     # real solutions of three quadrics in three unknowns; monomial order is
     # [x^2, xy, xz, y^2, yz, z^2, x, y, z, 1]. Writes up to 8 solutions as
-    # columns of `solutions` (3, 8) and returns their count.
+    # columns of `solutions` (3, 8) and returns their count. `scratch` is a
+    # workspace slice of 256 floats.
+    A = scratch[0:9].reshape(3, 3)
+    P = scratch[9:30].reshape(3, 7)
+    c = scratch[30:39]
+    chain = scratch[39:120].reshape(9, 9)
+    roots = scratch[120:128]
+    lo_stack = scratch[128:192]
+    hi_stack = scratch[192:256]
+
     detx = abs(_det3_cols(coeffs, 3, 5, 4))
     dety = abs(_det3_cols(coeffs, 0, 5, 2))
     detz = abs(_det3_cols(coeffs, 3, 0, 1))
@@ -159,8 +167,6 @@ def _re3q3(coeffs, solutions):
         det = detz
         elim_var = 2
 
-    A = np.empty((3, 3))
-    P = np.empty((3, 7))
     if elim_var == 0:
         for k in range(3):
             A[k, 0] = coeffs[k, 3]
@@ -302,7 +308,6 @@ def _re3q3(coeffs, solutions):
             + P[0, 5] * P[1, 4] * P[2, 6] - P[2, 4] * P[2, 5] * P[2, 6] * 2.0)
 
     # det(M(x)): degree-8 polynomial, ascending coefficients
-    c = np.empty(9)
     c[8] = a14 * a27 * a31 - a17 * a24 * a31 - a11 * a27 * a35 + a17 * a21 * a35 + a11 * a24 * a39 - a14 * a21 * a39
     c[7] = (a14 * a27 * a32 + a14 * a28 * a31 + a15 * a27 * a31 - a17 * a24 * a32 - a17 * a25 * a31
             - a18 * a24 * a31 - a11 * a27 * a36 - a11 * a28 * a35 - a12 * a27 * a35 + a17 * a21 * a36
@@ -365,10 +370,6 @@ def _re3q3(coeffs, solutions):
     c[0] = (-a26 * a34 * a110 + a23 * a38 * a110 + a16 * a34 * a210 - a13 * a38 * a210 + a13 * a26 * a313
             - a16 * a23 * a313)
 
-    chain = np.zeros((9, 9))
-    roots = np.empty(8)
-    lo_stack = np.empty(64)
-    hi_stack = np.empty(64)
     iw = np.empty(137, dtype=np.int64)
     degs = iw[0:9]
     slo_stack = iw[9:73]
@@ -407,7 +408,7 @@ def _re3q3(coeffs, solutions):
     return n_roots
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def _solve_4x4(A, B):
     # B <- A^{-1} B in place (Gaussian elimination with partial pivoting);
     # False only for an exactly singular pivot
@@ -447,13 +448,135 @@ def _solve_4x4(A, B):
     return True
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
+def _nullspace_p4pf(C, d):
+    # 4-dimensional nullspace of the 4x8 cross-product constraint matrix via
+    # Gaussian elimination (pivots on columns 0..3, free variables 4..7) and
+    # modified Gram-Schmidt, like the 5-point nullspace; basis vector j is
+    # written into d[8*j : 8*j + 8]
+    for col in range(4):
+        piv = col
+        max_val = abs(C[col, col])
+        for r in range(col + 1, 4):
+            v = abs(C[r, col])
+            if v > max_val:
+                max_val = v
+                piv = r
+        if max_val < 1e-12:
+            return False
+        if piv != col:
+            for c in range(col, 8):
+                t = C[col, c]
+                C[col, c] = C[piv, c]
+                C[piv, c] = t
+        inv = 1.0 / C[col, col]
+        for r in range(col + 1, 4):
+            factor = C[r, col] * inv
+            if factor != 0.0:
+                C[r, col] = 0.0
+                for c in range(col + 1, 8):
+                    C[r, c] -= factor * C[col, c]
+
+    for b in range(4):
+        base = 8 * b
+        free_col = 4 + b
+        for m in range(8):
+            d[base + m] = 0.0
+        d[base + free_col] = 1.0
+        for r in range(3, -1, -1):
+            s = C[r, free_col]
+            for c in range(r + 1, 4):
+                s += C[r, c] * d[base + c]
+            d[base + r] = -s / C[r, r]
+
+    for b in range(4):
+        base = 8 * b
+        for k in range(b):
+            kb = 8 * k
+            dot = 0.0
+            for m in range(8):
+                dot += d[base + m] * d[kb + m]
+            for m in range(8):
+                d[base + m] -= dot * d[kb + m]
+        norm = 0.0
+        for m in range(8):
+            norm += d[base + m] * d[base + m]
+        if norm < 1e-24:
+            return False
+        inv = 1.0 / math.sqrt(norm)
+        for m in range(8):
+            d[base + m] *= inv
+    return True
+
+
+@njit(cache=True, fastmath=True)
+def _project_rotation(m):
+    # snap the flat row-major 3x3 in m[0:9] to the nearest rotation via the
+    # quaternion round-trip (Shepperd's method) - the same renormalization
+    # poselib applies by storing poses as quaternions. Row rescaling leaves
+    # R only approximately orthogonal under noise.
+    t0 = 1.0 + m[0] + m[4] + m[8]
+    t1 = 1.0 + m[0] - m[4] - m[8]
+    t2 = 1.0 - m[0] + m[4] - m[8]
+    t3 = 1.0 - m[0] - m[4] + m[8]
+    if t0 >= t1 and t0 >= t2 and t0 >= t3:
+        r = math.sqrt(t0)
+        inv = 0.5 / r
+        qw = 0.5 * r
+        qx = (m[7] - m[5]) * inv
+        qy = (m[2] - m[6]) * inv
+        qz = (m[3] - m[1]) * inv
+    elif t1 >= t2 and t1 >= t3:
+        r = math.sqrt(t1)
+        inv = 0.5 / r
+        qw = (m[7] - m[5]) * inv
+        qx = 0.5 * r
+        qy = (m[1] + m[3]) * inv
+        qz = (m[2] + m[6]) * inv
+    elif t2 >= t3:
+        r = math.sqrt(t2)
+        inv = 0.5 / r
+        qw = (m[2] - m[6]) * inv
+        qx = (m[1] + m[3]) * inv
+        qy = 0.5 * r
+        qz = (m[5] + m[7]) * inv
+    else:
+        r = math.sqrt(t3)
+        inv = 0.5 / r
+        qw = (m[3] - m[1]) * inv
+        qx = (m[2] + m[6]) * inv
+        qy = (m[5] + m[7]) * inv
+        qz = 0.5 * r
+    inv = 1.0 / math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+    qw *= inv
+    qx *= inv
+    qy *= inv
+    qz *= inv
+    m[0] = 1.0 - 2.0 * (qy * qy + qz * qz)
+    m[1] = 2.0 * (qx * qy - qz * qw)
+    m[2] = 2.0 * (qx * qz + qy * qw)
+    m[3] = 2.0 * (qx * qy + qz * qw)
+    m[4] = 1.0 - 2.0 * (qx * qx + qz * qz)
+    m[5] = 2.0 * (qy * qz - qx * qw)
+    m[6] = 2.0 * (qx * qz - qy * qw)
+    m[7] = 2.0 * (qy * qz + qx * qw)
+    m[8] = 1.0 - 2.0 * (qx * qx + qy * qy)
+
+
+@njit(cache=True, fastmath=True)
 def _solve_p4pf(data, sample, models, workspace):
     x_x, x_y, X_x, X_y, X_z = data
     d = workspace[0:48]
+    C = workspace[48:80].reshape(4, 8)
+    A = workspace[80:96].reshape(4, 4)
+    B = workspace[96:112].reshape(4, 4)
+    coeffs = workspace[112:142].reshape(3, 10)
+    solutions = workspace[142:166].reshape(3, 8)
+    Pm = workspace[166:178].reshape(3, 4)
+    xs = workspace[178:186].reshape(2, 4)
+    Xs = workspace[186:198].reshape(4, 3)
+    scratch = workspace[198:454]
 
-    xs = np.empty((2, 4))
-    Xs = np.empty((4, 3))
     f0 = 0.0
     for k in range(4):
         i = sample[k]
@@ -472,26 +595,23 @@ def _solve_p4pf(data, sample, models, workspace):
         xs[1, k] *= inv_f0
 
     # nullspace of the eight cross-product constraints on the first two
-    # camera rows (interleaved as [P00 P10 P01 P11 P02 P12 P03 P13])
-    M = np.empty((8, 4))
+    # camera rows (interleaved as [P00 P10 P01 P11 P02 P12 P03 P13]);
+    # d[0:32] = N (8x4, column-major), an orthonormal basis of the nullspace
     for k in range(4):
-        M[0, k] = -xs[1, k] * Xs[k, 0]
-        M[2, k] = -xs[1, k] * Xs[k, 1]
-        M[4, k] = -xs[1, k] * Xs[k, 2]
-        M[6, k] = -xs[1, k]
-        M[1, k] = xs[0, k] * Xs[k, 0]
-        M[3, k] = xs[0, k] * Xs[k, 1]
-        M[5, k] = xs[0, k] * Xs[k, 2]
-        M[7, k] = xs[0, k]
-    U, s, Vt = np.linalg.svd(M)
-    # d[0:32] = N (8x4, column-major), the orthonormal basis of null(M^T)
-    for j in range(4):
-        for m in range(8):
-            d[8 * j + m] = U[m, 4 + j]
+        x = xs[0, k]
+        y = xs[1, k]
+        C[k, 0] = -y * Xs[k, 0]
+        C[k, 1] = x * Xs[k, 0]
+        C[k, 2] = -y * Xs[k, 1]
+        C[k, 3] = x * Xs[k, 1]
+        C[k, 4] = -y * Xs[k, 2]
+        C[k, 5] = x * Xs[k, 2]
+        C[k, 6] = -y
+        C[k, 7] = x
+    if not _nullspace_p4pf(C, d):
+        return 0
 
     # third camera row: [p31 p32 p33 p34] = B @ [alpha; 1]
-    A = np.empty((4, 4))
-    B = np.empty((4, 4))
     for k in range(4):
         if abs(xs[0, k]) < abs(xs[1, k]):
             A[k, 0] = xs[1, k] * Xs[k, 0]
@@ -517,7 +637,6 @@ def _solve_p4pf(data, sample, models, workspace):
             d[32 + 4 * j + i] = B[i, j]
 
     # orthogonality constraints between the three rotation rows
-    coeffs = np.empty((3, 10))
     coeffs[0, 0] = d[0] * d[1] + d[2] * d[3] + d[4] * d[5]
     coeffs[0, 1] = d[0] * d[9] + d[1] * d[8] + d[2] * d[11] + d[3] * d[10] + d[4] * d[13] + d[5] * d[12]
     coeffs[0, 2] = d[0] * d[17] + d[1] * d[16] + d[2] * d[19] + d[3] * d[18] + d[4] * d[21] + d[5] * d[20]
@@ -549,10 +668,8 @@ def _solve_p4pf(data, sample, models, workspace):
     coeffs[2, 8] = d[17] * d[44] + d[19] * d[45] + d[25] * d[40] + d[21] * d[46] + d[27] * d[41] + d[29] * d[42]
     coeffs[2, 9] = d[25] * d[44] + d[27] * d[45] + d[29] * d[46]
 
-    solutions = np.empty((3, 8))
-    n_sols = _re3q3(coeffs, solutions)
+    n_sols = _re3q3(coeffs, solutions, scratch)
 
-    Pm = np.empty((3, 4))
     best_err = 1.0
     found = False
     for i in range(n_sols):
@@ -619,18 +736,7 @@ def _solve_p4pf(data, sample, models, workspace):
     if not found:
         return 0
 
-    # project R back onto SO(3) (row rescaling leaves it only approximately
-    # orthogonal under noise); poselib does the same via its quaternion
-    # conversion
-    R = models[0, :9].copy().reshape(3, 3)
-    U, s, Vt = np.linalg.svd(R)
-    if np.linalg.det(U) * np.linalg.det(Vt) < 0.0:
-        for k in range(3):
-            Vt[2, k] = -Vt[2, k]
-    for r in range(3):
-        for k in range(3):
-            models[0, 3 * r + k] = (U[r, 0] * Vt[0, k] + U[r, 1] * Vt[1, k]
-                                    + U[r, 2] * Vt[2, k])
+    _project_rotation(models[0])
     return 1
 
 
@@ -639,5 +745,5 @@ class P4PFSolver():
     sample_size = 4
     num_params = MODEL_SIZE
     max_models = 1
-    workspace_size = 48
+    workspace_size = 454
     solve = staticmethod(_solve_p4pf)

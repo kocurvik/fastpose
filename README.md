@@ -29,20 +29,23 @@ specialized per problem by `RansacEstimator(solver, scorer, refiner)`.
 
 ```
 solvers/       minimal solvers: 7-point F, 5-point E, 7-point varying-focal
-               relative pose, P3P absolute pose; shared helpers in
-               solvers/utils.py
+               and 6-point shared-focal relative pose, P3P and P4Pf absolute
+               pose; shared helpers in solvers/utils.py
 scorers/       robust scorers: truncated Sampson (MSAC) for flat 3x3 models,
                for pose models [R|t] (E = [t]_x R assembled on the fly) and
-               for varying-focal pose models [R|t|f1|f2]; truncated
-               reprojection error for absolute pose models [R|t]
+               for varying/shared-focal pose models [R|t|f1|f2]; truncated
+               reprojection error for absolute pose models [R|t] and
+               unknown-focal models [R|t|f]
 refiners/      local optimization; refiners/lm.py is the generic LM engine,
                refiners/utils.py the shared factorization/jacobian machinery,
-               refiners/{fundamental,essential,varying_focal,absolute}.py
-               the per-problem kernels
+               refiners/{fundamental,essential,varying_focal,shared_focal,
+               absolute,absolute_focal}.py the per-problem kernels
 estimators/    the RANSAC engine (estimators/ransac.py) and the full pipelines
                estimate_fundamental / estimate_relative_pose /
                estimate_relative_pose_with_varying_focals /
-               estimate_absolute_pose; shared helpers in estimators/utils.py
+               estimate_relative_pose_with_shared_focal /
+               estimate_absolute_pose / estimate_absolute_pose_with_focal;
+               shared helpers in estimators/utils.py
 benchmarks/    benchmarks/estimators compares against poselib (mAA + runtime
                scaling); benchmarks/solvers evaluates solver accuracy on
                synthetic noise-free minimal samples; shared metrics, data
@@ -185,6 +188,48 @@ on the same engine:
   parameters (rotation update `R exp([w]_x)` + translation) with an analytic
   reprojection jacobian, on the shared LM engine.
 
+## Absolute pose with unknown focal (P4Pf) backend
+
+`estimate_absolute_pose_with_focal` estimates `[R | t | f]` from 2D-3D
+correspondences in pixel coordinates (square pixels, known principal point):
+
+- **P4Pf solver** (`solvers/p4pf.py`), a port of poselib's `p4pf.cc` +
+  `re3q3.cc`: the first two camera rows are parametrized by the 4-dimensional
+  nullspace of the eight cross-product constraints — computed by Gaussian
+  elimination + modified Gram-Schmidt like the 5-point nullspace (no LAPACK
+  SVD) — the third row follows linearly, and the three rotation-orthogonality
+  constraints form a 3Q3 system reduced to a degree-8 determinant polynomial
+  solved with the shared Sturm machinery. Candidates are cheirality-checked
+  on the sample, the solution closest to square pixels is kept, and R is
+  snapped back onto SO(3) via a quaternion round-trip (as poselib does by
+  storing poses as quaternions).
+- **Truncated focal reprojection scorer** (`scorers/reprojection.py`): the
+  `[R | t]` scorer with the focal folded into the projection, same
+  division-free inlier test and per-chunk early bail-out.
+- **LM refiner** (`refiners/absolute_focal.py`): 7 tangent parameters
+  (rotation, translation, log-focal) with an analytic jacobian.
+
+## Shared-focal relative pose backend
+
+`estimate_relative_pose_with_shared_focal` estimates relative pose plus one
+focal length shared by both cameras from pixel correspondences with known
+principal points:
+
+- **6-point minimal solver** (`solvers/shared_focal.py`), a port of
+  poselib's `relpose_6pt_focal.cc`: 3-dimensional nullspace by Gaussian
+  elimination + Gram-Schmidt, mixed by a fixed rotation because the
+  pregenerated elimination template is only valid for a generic nullspace
+  basis; the upstream 31x31 elimination template (solved as one augmented
+  31x46 system), and the 15x15 action matrix whose real eigenvalues are
+  extracted with the shared Danilevsky + Sturm machinery. Each solution
+  gives F and the focal; E = K^T F K is decomposed with the shared
+  closed-form essential decomposition and cheirality check into pose models
+  `[R | t | f | f]` (14 flat parameters, varying-focal layout).
+- **Scorer**: the varying-focal truncated Sampson scorer reused verbatim.
+- **LM refiner** (`refiners/shared_focal.py`): 6 tangent parameters —
+  rotation (3), translation direction (2) and one shared log-focal — with
+  the Sampson jacobian built like the varying-focal refiner.
+
 ## Install
 
 Install from the repository root:
@@ -202,7 +247,8 @@ fastpose-warmup
 
 The warmup command runs small synthetic estimations for every backend. Use
 `fastpose-warmup --problem fundamental` / `essential` / `absolute` /
-`varying-focal` to warm up only one backend.
+`absolute-focal` / `varying-focal` / `shared-focal` to warm up only one
+backend.
 
 Run with (from the repository root):
 
@@ -213,7 +259,10 @@ python -m benchmarks.estimators.absolute
 python -m benchmarks.estimators.fundamental scaling    # runtime scaling table
 python -m benchmarks.estimators.essential scaling
 python -m benchmarks.estimators.absolute scaling
+python -m benchmarks.estimators.absolute focal         # P4Pf mAA plot
+python -m benchmarks.estimators.absolute focal-scaling
 python -m benchmarks.estimators.fundamental varying-focal   # varying-focal mAA plot
+python -m benchmarks.estimators.fundamental shared-focal    # shared-focal mAA plot
 
 python -m benchmarks.solvers.fundamental               # noise-free minimal-sample accuracy
 python -m benchmarks.solvers.essential

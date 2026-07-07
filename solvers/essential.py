@@ -439,18 +439,30 @@ def _real_roots_sturm(coef, degree, chain, degs, roots, lo_stack, hi_stack,
             p_lo = _poly_eval(chain[0], n, lo)
             p_hi = _poly_eval(chain[0], n, hi)
             if (p_lo < 0.0) != (p_hi < 0.0):
-                # plain bisection on the polynomial sign down to a relative
-                # tolerance; the Newton polish below finishes the job
+                # safeguarded Newton-bisection on the polynomial sign: the
+                # bracket is always maintained and the midpoint is the
+                # fallback, so this is never less robust than bisection but
+                # converges quadratically for simple roots
+                x = 0.5 * (lo + hi)
                 for _ in range(80):
-                    mid = 0.5 * (lo + hi)
-                    if hi - lo < 1e-11 * (1.0 + abs(mid)):
+                    if hi - lo < 1e-13 * (1.0 + abs(x)):
                         break
-                    p_mid = _poly_eval(chain[0], n, mid)
-                    if (p_mid < 0.0) == (p_lo < 0.0):
-                        lo = mid
-                        p_lo = p_mid
+                    p = _poly_eval(chain[0], n, x)
+                    if p == 0.0:
+                        break
+                    if (p < 0.0) == (p_lo < 0.0):
+                        lo = x
                     else:
-                        hi = mid
+                        hi = x
+                    dp = _poly_eval(chain[1], n - 1, x)
+                    x_new = 0.5 * (lo + hi)
+                    if dp != 0.0:
+                        step = x - p / dp
+                        if lo < step < hi:
+                            x_new = step
+                    if x_new == x:
+                        break
+                    x = x_new
             else:
                 # even multiplicity in the squarefree sense is impossible,
                 # but the endpoints may straddle awkwardly: bisect on the
@@ -466,7 +478,7 @@ def _real_roots_sturm(coef, degree, chain, degs, roots, lo_stack, hi_stack,
                     else:
                         lo = mid
                         s_lo = s_mid
-            x = 0.5 * (lo + hi)
+                x = 0.5 * (lo + hi)
             # Newton polish
             for _ in range(3):
                 p = _poly_eval(chain[0], n, x)
