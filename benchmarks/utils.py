@@ -156,6 +156,36 @@ def generate_varying_focal_relpose_data(rng, num_samples, noise_sigma=1.0,
     return x1, x2, R, t, pp1, pp2
 
 
+def generate_abspose_data(rng, num_samples, noise_sigma=1.0, outlier_ratio=0.2,
+                          focal=1000.0, image_size=2000.0):
+    # synthetic 2D-3D correspondences in pixel coordinates with a known
+    # absolute pose (X_cam = R X_world + t); returns pixel points, world
+    # points and the ground truth (R, t)
+    axis = rng.normal(size=3)
+    axis /= np.linalg.norm(axis)
+    angle = rng.uniform(0.0, math.pi)
+    K = skew(axis)
+    R = np.eye(3) + math.sin(angle) * K + (1.0 - math.cos(angle)) * (K @ K)
+    t = rng.normal(size=3)
+
+    # sample points inside the camera frustum, then map them to world space
+    xn = rng.uniform(-0.45, 0.45, size=(num_samples, 2))
+    depth = rng.uniform(4.0, 10.0, size=num_samples)
+    X_cam = np.column_stack([xn * depth[:, None], depth])
+    X = (X_cam - t) @ R  # rows are R^T (X_cam - t)
+
+    c = image_size / 2.0
+    x = focal * xn + c
+    x += rng.normal(scale=noise_sigma, size=x.shape)
+
+    num_outliers = int(num_samples * outlier_ratio)
+    if num_outliers:
+        outlier_idxs = rng.choice(num_samples, num_outliers, replace=False)
+        x[outlier_idxs] = rng.uniform(0.0, image_size, size=(num_outliers, 2))
+
+    return x, X, R, t
+
+
 def generate_exact_fundamental_sample(rng, num_samples=7):
     # noise-free correspondences in [-1, 1]^2 for a random rank-2 F
     F = _random_rank2_f(rng)

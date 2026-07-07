@@ -29,18 +29,20 @@ specialized per problem by `RansacEstimator(solver, scorer, refiner)`.
 
 ```
 solvers/       minimal solvers: 7-point F, 5-point E, 7-point varying-focal
-               relative pose; shared helpers in solvers/utils.py
+               relative pose, P3P absolute pose; shared helpers in
+               solvers/utils.py
 scorers/       robust scorers: truncated Sampson (MSAC) for flat 3x3 models,
                for pose models [R|t] (E = [t]_x R assembled on the fly) and
-               for varying-focal pose models [R|t|f1|f2]
+               for varying-focal pose models [R|t|f1|f2]; truncated
+               reprojection error for absolute pose models [R|t]
 refiners/      local optimization; refiners/lm.py is the generic LM engine,
                refiners/utils.py the shared factorization/jacobian machinery,
-               refiners/{fundamental,essential,varying_focal}.py the
-               per-problem kernels
+               refiners/{fundamental,essential,varying_focal,absolute}.py
+               the per-problem kernels
 estimators/    the RANSAC engine (estimators/ransac.py) and the full pipelines
                estimate_fundamental / estimate_relative_pose /
-               estimate_relative_pose_with_varying_focals;
-               shared helpers in estimators/utils.py
+               estimate_relative_pose_with_varying_focals /
+               estimate_absolute_pose; shared helpers in estimators/utils.py
 benchmarks/    benchmarks/estimators compares against poselib (mAA + runtime
                scaling); benchmarks/solvers evaluates solver accuracy on
                synthetic noise-free minimal samples; shared metrics, data
@@ -164,6 +166,25 @@ on the same engine:
 - Hypotheses whose Bougnoux focal estimates are non-positive are rejected
   inside the solver.
 
+## Absolute pose (P3P) backend
+
+`estimate_absolute_pose` estimates the pose `[R | t]` (with
+`lambda * (x, y, 1) = R X + t`) from calibrated 2D-3D correspondences:
+
+- **P3P solver of Ding et al.** (`solvers/p3p.py`, "Revisiting the P3P
+  Problem", CVPR 2023), ported from poselib's `p3p.cc`: the three
+  correspondences reduce to a single cubic; the rank-2 conic pencil splits
+  into two lines, each giving a quadratic in a depth ratio, and the depths
+  are polished with a few Newton steps before the pose is assembled — no
+  eigendecomposition anywhere.
+- **Truncated reprojection scorer** (`scorers/reprojection.py`): fused MSAC
+  scoring with the same exact per-chunk early bail-out as the Sampson
+  scorers; the inlier test is division-free and points behind the camera
+  count as outliers.
+- **LM refiner on the pose directly** (`refiners/absolute.py`): 6 tangent
+  parameters (rotation update `R exp([w]_x)` + translation) with an analytic
+  reprojection jacobian, on the shared LM engine.
+
 ## Install
 
 Install from the repository root:
@@ -179,18 +200,19 @@ up front, run:
 fastpose-warmup
 ```
 
-The warmup command runs small synthetic fundamental-matrix and relative-pose
-estimations. Use `fastpose-warmup --problem fundamental`,
-`--problem essential` or `--problem varying-focal` to warm up only one
-backend.
+The warmup command runs small synthetic estimations for every backend. Use
+`fastpose-warmup --problem fundamental` / `essential` / `absolute` /
+`varying-focal` to warm up only one backend.
 
 Run with (from the repository root):
 
 ```
 python -m benchmarks.estimators.fundamental            # mAA vs runtime plot
 python -m benchmarks.estimators.essential
+python -m benchmarks.estimators.absolute
 python -m benchmarks.estimators.fundamental scaling    # runtime scaling table
 python -m benchmarks.estimators.essential scaling
+python -m benchmarks.estimators.absolute scaling
 python -m benchmarks.estimators.fundamental varying-focal   # varying-focal mAA plot
 
 python -m benchmarks.solvers.fundamental               # noise-free minimal-sample accuracy
@@ -204,5 +226,4 @@ before timing.)
 
 ## Next steps
 
-- Absolute pose (P3P) as a new solver/scorer/refiner triple on the same engine.
 - Degeneracy handling (e.g. dominant-plane checks à la DEGENSAC).

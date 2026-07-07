@@ -1,3 +1,4 @@
 from refiners.essential import LMEssentialRefiner
 from refiners.fundamental import LMFundamentalRefiner
 from refiners.varying_focal import LMVaryingFocalPoseRefiner
+from refiners.absolute import LMAbsolutePoseRefiner
