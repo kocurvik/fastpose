@@ -1,0 +1,85 @@
+"""Full calibrated relative pose estimator: LO-RANSAC with the 5-point
+solver that outputs poses [R | t] directly (cheirality-checked on the
+minimal sample), the pose Sampson scorer (E = [t]_x R assembled on the fly)
+and the direct pose LM refiner. `motion_from_essential` is kept for
+decomposing externally estimated E/F matrices (e.g. the fundamental matrix
+benchmark).
+"""
+
+import numpy as np
+
+from estimators.ransac import RansacEstimator
+from estimators.utils import point_columns
+from refiners.essential import LMEssentialRefiner
+from scorers.sampson import PoseSampsonScorer
+from solvers.essential import FivePointSolver
+
+_default_estimator = None
+
+
+def _get_default_estimator():
+    global _default_estimator
+    if _default_estimator is None:
+        _default_estimator = RansacEstimator(FivePointSolver(), PoseSampsonScorer(),
+                                             LMEssentialRefiner())
+    return _default_estimator
+
+
+def estimate_relative_pose_numba(x1, x2, iterations=1000, max_error=0.002,
+                                 seed=None, min_iterations=None,
+                                 success_prob=0.9999, lo_iterations=None):
+    # params:
+    # x1, x2 - (n, 2) arrays of corresponding *calibrated* (normalized) image
+    #          points; for pixel points apply (x - c) / f first
+    # max_error - Sampson threshold in the same normalized units
+    #             (pixel threshold divided by focal length)
+    # returns best_R, best_t (unit norm, x2 ~ R x1 + t), num_inliers, inliers
+    x1 = np.ascontiguousarray(x1, dtype=np.float64)
+    x2 = np.ascontiguousarray(x2, dtype=np.float64)
+    data = point_columns(x1, x2)
+
+    estimator = _get_default_estimator()
+    model, score, num_inliers, _ = estimator.estimate(
+        data, len(x1), max_error, iterations=iterations,
+        min_iterations=min_iterations, success_prob=success_prob,
+        lo_iterations=lo_iterations, seed=seed)
+
+    if num_inliers == 0:
+        return None, None, 0, None
+
+    R = model[:9].reshape(3, 3).copy()
+    t = model[9:12].copy()
+    _, inliers, num_inliers = PoseSampsonScorer.score_numpy(R, t, x1, x2, max_error)
+    return R, t, num_inliers, inliers
+
+
+def motion_from_essential(E, x1, x2, max_points=100):
+    # decompose E into (R, t) with x2 ~ R x1 + t, choosing among the four
+    # candidates by cheirality on up to max_points calibrated correspondences
+    U, _, Vt = np.linalg.svd(E)
+    if np.linalg.det(U) < 0:
+        U = -U
+    if np.linalg.det(Vt) < 0:
+        Vt = -Vt
+    W = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+
+    x1h = np.column_stack([x1[:max_points], np.ones(min(len(x1), max_points))])
+    x2h = np.column_stack([x2[:max_points], np.ones(min(len(x2), max_points))])
+
+    best_count = -1
+    best_R = None
+    best_t = None
+    for R in (U @ W @ Vt, U @ W.T @ Vt):
+        rx1 = x1h @ R.T
+        for t in (U[:, 2], -U[:, 2]):
+            # depth in camera 1 from x2 x (z1 * R x1 + t) = 0
+            c = np.cross(x2h, rx1)
+            d = np.cross(x2h, np.broadcast_to(t, x2h.shape))
+            z1 = -np.sum(c * d, axis=1) / np.sum(c * c, axis=1)
+            z2 = z1 * rx1[:, 2] + t[2]
+            count = np.count_nonzero((z1 > 0) & (z2 > 0))
+            if count > best_count:
+                best_count = count
+                best_R = R
+                best_t = t
+    return best_R, best_t
