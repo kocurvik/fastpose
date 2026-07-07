@@ -3,3 +3,4 @@ from estimators.fundamental import estimate_fundamental_numpy, estimate_fundamen
 from estimators.essential import estimate_relative_pose, motion_from_essential
 from estimators.varying_focal import estimate_relative_pose_with_varying_focals
 from estimators.absolute import estimate_absolute_pose
+from estimators.absolute_focal import estimate_absolute_pose_with_focal

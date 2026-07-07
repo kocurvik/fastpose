@@ -6,6 +6,7 @@ import time
 import numpy as np
 
 from estimators.absolute import estimate_absolute_pose
+from estimators.absolute_focal import estimate_absolute_pose_with_focal
 from estimators.essential import estimate_relative_pose
 from estimators.fundamental import estimate_fundamental
 from estimators.varying_focal import estimate_relative_pose_with_varying_focals
@@ -73,6 +74,20 @@ def warmup(problem="all", iterations=3, lo_iterations=1):
             lo_iterations=lo_iterations,
         )
 
+    if problem in ("all", "absolute-focal"):
+        rng = np.random.default_rng(0)
+        depth = rng.uniform(3.0, 6.0, size=len(x1))
+        world = np.column_stack([x1 * depth[:, None], depth])
+        estimate_absolute_pose_with_focal(
+            x1 * 1000.0,
+            world,
+            iterations=iterations,
+            min_iterations=iterations,
+            max_error=2.0,
+            seed=0,
+            lo_iterations=lo_iterations,
+        )
+
     if problem in ("all", "varying-focal"):
         pp1 = np.array([500.0, 480.0])
         pp2 = np.array([620.0, 510.0])
@@ -97,7 +112,8 @@ def main(argv=None):
     )
     parser.add_argument(
         "--problem",
-        choices=("all", "fundamental", "essential", "absolute", "varying-focal"),
+        choices=("all", "fundamental", "essential", "absolute",
+                 "absolute-focal", "varying-focal"),
         default="all",
         help="Subset of kernels to warm up.",
     )

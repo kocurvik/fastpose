@@ -3,7 +3,12 @@
 Default run evaluates pose mAA vs mean runtime for RANSAC iteration budgets
 [100, 200, 500, 1000] and writes the tradeoff plot to abspose_maa.png;
 `python -m benchmarks.estimators.absolute scaling` runs the runtime-scaling
-benchmark over match counts instead.
+benchmark over match counts instead and
+`python -m benchmarks.estimators.absolute focal` evaluates the P4Pf
+unknown-focal estimator against P3P with the ground-truth focal, and
+`python -m benchmarks.estimators.absolute focal-scaling` measures its
+runtime scaling over match counts. Poselib's Python bindings expose no
+unknown-focal absolute pose estimator.
 
 Pose error is max(rotation error in degrees, camera-center error as a
 percentage of the mean scene depth), so mAA(10) pairs 1..10 degrees with
@@ -18,6 +23,7 @@ import numpy as np
 from benchmarks.utils import (generate_abspose_data, pose_maa,
                               plot_maa_tradeoff, rotation_error_deg)
 from estimators.absolute import estimate_absolute_pose
+from estimators.absolute_focal import estimate_absolute_pose_with_focal
 
 MEAN_SCENE_DEPTH = 7.0  # depths are drawn uniformly from [4, 10]
 
@@ -155,8 +161,122 @@ def run_scaling_benchmark():
         print()
 
 
+def run_focal_scaling_benchmark():
+    # runtime scaling over match counts at a fixed iteration budget for the
+    # unknown-focal absolute pose estimator
+    iterations = 1000
+    max_error = 2.0  # pixels
+    focal = 1200.0
+    image_size = 2000.0
+    repeats = 5
+
+    rng = np.random.default_rng(0)
+    x_w, X_w, _, _ = generate_abspose_data(
+        rng, 100, focal=focal, image_size=image_size)
+    xc_w = x_w - image_size / 2.0
+    estimate_absolute_pose_with_focal(
+        xc_w, X_w, iterations=10, max_error=max_error)
+
+    for num_samples in [1000, 10000, 50000]:
+        rng = np.random.default_rng(0)
+        x, X, R_gt, t_gt = generate_abspose_data(
+            rng, num_samples, noise_sigma=2.0, outlier_ratio=0.3,
+            focal=focal, image_size=image_size)
+        xc = x - image_size / 2.0
+        print(f'=== {num_samples} matches, {iterations} iterations ===')
+
+        for label, lo in [('p4pf', 0), ('p4pf+LO', None)]:
+            times = []
+            for _ in range(repeats):
+                start = time.perf_counter()
+                R_est, t_est, f_est, num_inliers, inliers = (
+                    estimate_absolute_pose_with_focal(
+                        xc, X, iterations=iterations, max_error=max_error,
+                        lo_iterations=lo))
+                times.append(time.perf_counter() - start)
+            if R_est is None:
+                print(f'{label:11s} {min(times):.4f}s, no model returned')
+                continue
+            rot_err = rotation_error_deg(R_est, R_gt)
+            focal_err = abs(f_est - focal) / focal
+            print(f'{label:11s} {min(times):.4f}s, inliers={num_inliers}/{num_samples}, '
+                  f'rot err={rot_err:.3f} deg, focal err={focal_err:.3%}')
+        print()
+
+
+def evaluate_focal_maa(num_scenes=100, num_samples=5000, noise_sigma=2.0,
+                       outlier_ratio=0.3, iterations_list=(100, 200, 500, 1000),
+                       focal=1200.0, image_size=2000.0, max_error=2.0,
+                       plot_path='abspose_focal_maa.png'):
+    c = image_size / 2.0
+
+    print(f'generating {num_scenes} scenes '
+          f'({num_samples} matches, {noise_sigma} px noise, {outlier_ratio:.0%} outliers)')
+    scenes = []
+    for i in range(num_scenes):
+        g = np.random.default_rng(50000 + i)
+        x, X, R_gt, t_gt = generate_abspose_data(
+            g, num_samples, noise_sigma=noise_sigma, outlier_ratio=outlier_ratio,
+            focal=focal, image_size=image_size)
+        scenes.append((x - c, (x - c) / focal, X, R_gt, t_gt))
+
+    # warm up the JIT so compilation time is not measured
+    estimate_absolute_pose(scenes[0][1][:100], scenes[0][2][:100],
+                           iterations=10, max_error=max_error / focal)
+    estimate_absolute_pose_with_focal(scenes[0][0][:100], scenes[0][2][:100],
+                                      iterations=10, max_error=max_error)
+
+    methods = ['p3p+gtf', 'p4pf', 'p4pf+LO']
+    results = {m: {'runtime_ms': [], 'maa': []} for m in methods}
+
+    for iters in iterations_list:
+        errors = {m: [] for m in methods}
+        times = {m: [] for m in methods}
+        focal_errs = []
+        for si, (xc, xn, X, R_gt, t_gt) in enumerate(scenes):
+            start = time.perf_counter()
+            R_est, t_est, num_inliers, inliers = estimate_absolute_pose(
+                xn, X, iterations=iters, max_error=max_error / focal,
+                lo_iterations=None, seed=si)
+            times['p3p+gtf'].append(time.perf_counter() - start)
+            errors['p3p+gtf'].append(_abs_pose_error(R_est, t_est, R_gt, t_gt))
+
+            for method, lo in (('p4pf', 0), ('p4pf+LO', None)):
+                start = time.perf_counter()
+                R_est, t_est, f_est, num_inliers, inliers = (
+                    estimate_absolute_pose_with_focal(
+                        xc, X, iterations=iters, max_error=max_error,
+                        lo_iterations=lo, seed=si))
+                times[method].append(time.perf_counter() - start)
+                errors[method].append(_abs_pose_error(R_est, t_est, R_gt, t_gt))
+                if method == 'p4pf+LO' and f_est is not None:
+                    focal_errs.append(abs(f_est - focal) / focal)
+
+        print(f'--- {iters} iterations ---')
+        for m in methods:
+            rt = float(np.mean(times[m])) * 1000.0
+            maa = pose_maa(errors[m])
+            results[m]['runtime_ms'].append(rt)
+            results[m]['maa'].append(maa)
+            print(f'{m:10s} mAA(10)={maa:.4f}  mean runtime={rt:8.2f} ms')
+        if focal_errs:
+            print(f'p4pf+LO median focal error: {np.median(focal_errs):.3%}')
+        else:
+            print('p4pf+LO median focal error: no valid estimates')
+
+    plot_maa_tradeoff(results, methods, iterations_list, plot_path,
+                      'Absolute pose with unknown focal: accuracy vs runtime '
+                      '\N{EM DASH} point labels are RANSAC iterations')
+    print(f'\nplot written to {plot_path}')
+    return results
+
+
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'scaling':
         run_scaling_benchmark()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'focal-scaling':
+        run_focal_scaling_benchmark()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'focal':
+        evaluate_focal_maa()
     else:
         evaluate_maa()

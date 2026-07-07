@@ -277,10 +277,12 @@ def plot_maa_tradeoff(results, methods, iterations_list, path, title):
     baseline = '#c3c2b7'
     colors = {'numba': '#2a78d6', 'numba+LO': '#1baf7a', 'poselib': '#eda100',
               'fundamental+gtK': '#2a78d6', 'varying-f': '#8b5cf6',
-              'varying-f+LO': '#1baf7a'}
+              'varying-f+LO': '#1baf7a', 'p3p+gtf': '#2a78d6',
+              'p4pf': '#8b5cf6', 'p4pf+LO': '#1baf7a'}
     markers = {'numba': 'o', 'numba+LO': 's', 'poselib': '^',
                'fundamental+gtK': 'o', 'varying-f': 'D',
-               'varying-f+LO': 's'}
+               'varying-f+LO': 's', 'p3p+gtf': 'o', 'p4pf': 'D',
+               'p4pf+LO': 's'}
 
     fig, ax = plt.subplots(figsize=(7.5, 5.0), dpi=150, facecolor=surface)
     ax.set_facecolor(surface)
