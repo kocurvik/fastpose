@@ -141,6 +141,25 @@ so the advantage at small n is smaller; scoring still dominates for dense
 matches. Inlier counts are not directly comparable to poselib for this problem
 since poselib additionally applies cheirality filtering during scoring.)
 
+## Install
+
+Install from the repository root:
+
+```
+pip install .
+```
+
+Numba compiles kernels lazily on first use. To populate the local Numba cache
+up front, run:
+
+```
+fastpose-warmup
+```
+
+The warmup command runs small synthetic fundamental-matrix and relative-pose
+estimations. Use `fastpose-warmup --problem fundamental` or
+`fastpose-warmup --problem essential` to warm up only one backend.
+
 Run with (from the repository root):
 
 ```

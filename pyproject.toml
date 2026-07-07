@@ -25,5 +25,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
 
+[project.scripts]
+fastpose-warmup = "estimators.warmup:main"
+
 [tool.setuptools]
 packages = ["estimators", "refiners", "scorers", "solvers"]
