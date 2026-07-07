@@ -1,0 +1,17 @@
+# byte-code and numba JIT caches
+__pycache__/
+*.pyc
+*.nbc
+*.nbi
+
+# benchmark plot outputs
+*.png
+
+# packaging
+build/
+dist/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/

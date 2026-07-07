@@ -545,13 +545,16 @@ def _nullspace_free_last(G, v):
 
 
 @njit(cache=True, fastmath=True)
-def _pose_from_essential(e, data, sample, pose, R):
+def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
+                         pose, R):
     # closed-form decomposition of the flat essential matrix e (no SVD):
     # t spans the left nullspace of E, computed as the largest cross product
     # of two columns; the twisted-pair rotations follow from Horn's formula
     # R = cof(E) -/+ [t]_x E for E scaled to unit nonzero singular values
     # and unit t. Of the four candidates {R_a, R_b} x {t, -t} the one with
     # the best cheirality count on the minimal sample is written to `pose`.
+    # The cheirality vote calibrates points as (x - pp) / f, so problems
+    # whose `data` already holds calibrated points pass pp = 0, f = 1.
     # R is a (2, 3, 3) scratch buffer. Returns False for degenerate e.
     x1_x, x1_y, x2_x, x2_y = data
 
@@ -657,10 +660,10 @@ def _pose_from_essential(e, data, sample, pose, R):
             count = 0
             for k in range(sample.shape[0]):
                 idx = sample[k]
-                x = x1_x[idx]
-                y = x1_y[idx]
-                xp = x2_x[idx]
-                yp = x2_y[idx]
+                x = (x1_x[idx] - pp1x) / f1
+                y = (x1_y[idx] - pp1y) / f1
+                xp = (x2_x[idx] - pp2x) / f2
+                yp = (x2_y[idx] - pp2y) / f2
                 rx0 = R[ri, 0, 0] * x + R[ri, 0, 1] * y + R[ri, 0, 2]
                 rx1 = R[ri, 1, 0] * x + R[ri, 1, 1] * y + R[ri, 1, 2]
                 rx2 = R[ri, 2, 0] * x + R[ri, 2, 1] * y + R[ri, 2, 2]
@@ -767,7 +770,8 @@ def _solve_5pt(data, sample, models, workspace):
         z_sol = v[8]
         for j in range(9):
             e[j] = lam * N[0, j] + y_sol * N[1, j] + z_sol * N[2, j] + N[3, j]
-        if _pose_from_essential(e, data, sample, models[count], Rbuf):
+        if _pose_from_essential(e, data, sample, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0,
+                                models[count], Rbuf):
             count += 1
     return count
 

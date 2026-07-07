@@ -1,7 +1,7 @@
 """Full fundamental matrix estimator: LO-RANSAC with the 7-point solver,
 Sampson scorer and factorized LM refiner, plus Hartley-style normalization.
-A pure-numpy reference implementation (`estimate_fundamental`) is kept for
-benchmarking.
+A pure-numpy reference implementation (`estimate_fundamental_numpy`) is kept
+for benchmarking.
 """
 
 import numpy as np

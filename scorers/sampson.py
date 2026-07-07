@@ -8,8 +8,6 @@ relative pose models [R | t] by assembling E = [t]_x R on the fly.
 import numpy as np
 from numba import njit
 
-from solvers.varying_focal import model_to_fundamental
-
 
 @njit(cache=True, fastmath=True)
 def sampson_score(f, data, max_error_sq, best_score):
@@ -124,6 +122,32 @@ class PoseSampsonScorer():
                       [t[2], 0.0, -t[0]],
                       [-t[1], t[0], 0.0]]) @ R
         return SampsonScorer.score_numpy(E, x1, x2, max_error)
+
+
+@njit(cache=True)
+def model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, f):
+    # f = flat F = K2^-T E K1^-1 for a pose model [R | t | f1 | f2] with
+    # K = [[f, 0, ppx], [0, f, ppy], [0, 0, 1]]; False for invalid focals
+    f1 = model[12]
+    f2 = model[13]
+    if f1 <= 0.0 or f2 <= 0.0:
+        return False
+    e = np.empty(9)
+    essential_from_pose(model, e)
+    inv1 = 1.0 / f1
+    inv2 = 1.0 / f2
+    # rows of A = K2^-T E, then columns of F = A K1^-1
+    a = np.empty(9)
+    for j in range(3):
+        a[j] = inv2 * e[j]
+        a[3 + j] = inv2 * e[3 + j]
+        a[6 + j] = e[6 + j] - inv2 * (pp2x * e[j] + pp2y * e[3 + j])
+    for i in range(3):
+        f[3 * i] = inv1 * a[3 * i]
+        f[3 * i + 1] = inv1 * a[3 * i + 1]
+        f[3 * i + 2] = (a[3 * i + 2]
+                        - inv1 * (pp1x * a[3 * i] + pp1y * a[3 * i + 1]))
+    return True
 
 
 @njit(cache=True, fastmath=True)

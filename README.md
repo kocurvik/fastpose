@@ -28,21 +28,25 @@ specialized per problem by `RansacEstimator(solver, scorer, refiner)`.
 ### Layout
 
 ```
-solvers/       minimal solvers: 7-point F, 5-point E; shared helpers in solvers/utils.py
-scorers/       robust scorers: truncated Sampson (MSAC) for flat 3x3 models
-               and for pose models [R|t] (E = [t]_x R assembled on the fly)
+solvers/       minimal solvers: 7-point F, 5-point E, 7-point varying-focal
+               relative pose; shared helpers in solvers/utils.py
+scorers/       robust scorers: truncated Sampson (MSAC) for flat 3x3 models,
+               for pose models [R|t] (E = [t]_x R assembled on the fly) and
+               for varying-focal pose models [R|t|f1|f2]
 refiners/      local optimization; refiners/lm.py is the generic LM engine,
                refiners/utils.py the shared factorization/jacobian machinery,
-               refiners/{fundamental,essential}.py the per-problem kernels
+               refiners/{fundamental,essential,varying_focal}.py the
+               per-problem kernels
 estimators/    the RANSAC engine (estimators/ransac.py) and the full pipelines
-               estimate_fundamental_numba / estimate_relative_pose_numba;
+               estimate_fundamental / estimate_relative_pose /
+               estimate_relative_pose_with_varying_focals;
                shared helpers in estimators/utils.py
 benchmarks/    benchmarks/estimators compares against poselib (mAA + runtime
                scaling); benchmarks/solvers evaluates solver accuracy on
                synthetic noise-free minimal samples; shared metrics, data
                generation and plotting in benchmarks/utils.py
-tests/jac/     finite-difference checks of the refiner jacobians and
-               refinement tests on synthetic samples
+tests/         finite-difference checks of the refiner jacobians (tests/jac)
+               and end-to-end estimator tests on synthetic scenes
 ```
 
 Adding a new problem (P3P, ...) means writing the three kernels and their wrapper —
@@ -141,6 +145,25 @@ so the advantage at small n is smaller; scoring still dominates for dense
 matches. Inlier counts are not directly comparable to poselib for this problem
 since poselib additionally applies cheirality filtering during scoring.)
 
+## Varying-focal relative pose backend
+
+`estimate_relative_pose_with_varying_focals` estimates relative pose plus two
+unknown focal lengths from pixel correspondences with known principal points,
+on the same engine:
+
+- **Minimal solver** (`solvers/varying_focal.py`): standard 7-point fundamental
+  matrix hypotheses, focal lengths from the Bougnoux formula (square pixels,
+  known principal points), then E = K2^T F K1 decomposed with the shared
+  closed-form essential decomposition and cheirality check into pose models
+  `[R | t | f1 | f2]` (14 flat parameters).
+- **Scorer**: the truncated Sampson error of the induced fundamental matrix
+  F = K2^-T E K1^-1, evaluated in the original pixel coordinates.
+- **LM refiner** (`refiners/varying_focal.py`): 7 tangent parameters — rotation
+  (3), translation direction (2) and the two log-focals — with the Sampson
+  jacobian built from a central-difference tangent basis of the induced F.
+- Hypotheses whose Bougnoux focal estimates are non-positive are rejected
+  inside the solver.
+
 ## Install
 
 Install from the repository root:
@@ -157,8 +180,9 @@ fastpose-warmup
 ```
 
 The warmup command runs small synthetic fundamental-matrix and relative-pose
-estimations. Use `fastpose-warmup --problem fundamental` or
-`fastpose-warmup --problem essential` to warm up only one backend.
+estimations. Use `fastpose-warmup --problem fundamental`,
+`--problem essential` or `--problem varying-focal` to warm up only one
+backend.
 
 Run with (from the repository root):
 
@@ -167,11 +191,12 @@ python -m benchmarks.estimators.fundamental            # mAA vs runtime plot
 python -m benchmarks.estimators.essential
 python -m benchmarks.estimators.fundamental scaling    # runtime scaling table
 python -m benchmarks.estimators.essential scaling
+python -m benchmarks.estimators.fundamental varying-focal   # varying-focal mAA plot
 
 python -m benchmarks.solvers.fundamental               # noise-free minimal-sample accuracy
 python -m benchmarks.solvers.essential
 
-python -m pytest tests/jac                             # jacobian + refinement tests
+python -m pytest tests                                 # jacobian + estimator tests
 ```
 
 (First call JIT-compiles the driver for a few seconds; the benchmarks warm up

@@ -16,7 +16,7 @@ from benchmarks.utils import (generate_data, generate_relpose_data, pose_maa,
                               plot_maa_tradeoff, rotation_error_deg,
                               translation_error_deg)
 from estimators.essential import motion_from_essential
-from estimators.fundamental import estimate_fundamental_numpy, estimate_fundamental
+from estimators.fundamental import estimate_fundamental
 from estimators.varying_focal import estimate_relative_pose_with_varying_focals
 from scorers.sampson import SampsonScorer
 
@@ -130,15 +130,6 @@ def run_scaling_benchmark():
         rng = np.random.default_rng(0)
         x1, x2 = generate_data(rng, num_samples)
         print(f'=== {num_samples} matches, {iterations} iterations ===')
-
-        # if num_samples <= 1000:
-        #     times = []
-        #     for _ in range(repeats):
-        #         start = time.perf_counter()
-        #         F, num_inliers, inliers = estimate_fundamental_numpy(
-        #             x1, x2, iterations=iterations, max_error=max_error)
-        #         times.append(time.perf_counter() - start)
-        #     print(f'numpy:      {min(times):.4f}s, inliers={num_inliers}/{num_samples}')
 
         times = []
         for _ in range(repeats):
