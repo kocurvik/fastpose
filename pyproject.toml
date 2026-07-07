@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastpose"
+version = "0.1.0"
+description = "Fast Python/Numba backend for robust relative pose estimation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "fastpose contributors" }
+]
+dependencies = [
+    "numba",
+    "numpy",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+[tool.setuptools]
+packages = ["estimators", "refiners", "scorers", "solvers"]
