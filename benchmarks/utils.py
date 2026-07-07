@@ -156,6 +156,18 @@ def generate_varying_focal_relpose_data(rng, num_samples, noise_sigma=1.0,
     return x1, x2, R, t, pp1, pp2
 
 
+def generate_shared_focal_relpose_data(rng, num_samples, noise_sigma=1.0,
+                                       outlier_ratio=0.2, focal=1000.0,
+                                       pp1=(500.0, 480.0),
+                                       pp2=(620.0, 510.0)):
+    # synthetic two-view correspondences with one shared focal length and
+    # known principal points. Noise is added in second-image pixel units.
+    return generate_varying_focal_relpose_data(
+        rng, num_samples, noise_sigma=noise_sigma,
+        outlier_ratio=outlier_ratio, focal1=focal, focal2=focal,
+        pp1=pp1, pp2=pp2)
+
+
 def generate_abspose_data(rng, num_samples, noise_sigma=1.0, outlier_ratio=0.2,
                           focal=1000.0, image_size=2000.0):
     # synthetic 2D-3D correspondences in pixel coordinates with a known
@@ -278,11 +290,12 @@ def plot_maa_tradeoff(results, methods, iterations_list, path, title):
     colors = {'numba': '#2a78d6', 'numba+LO': '#1baf7a', 'poselib': '#eda100',
               'fundamental+gtK': '#2a78d6', 'varying-f': '#8b5cf6',
               'varying-f+LO': '#1baf7a', 'p3p+gtf': '#2a78d6',
-              'p4pf': '#8b5cf6', 'p4pf+LO': '#1baf7a'}
+              'p4pf': '#8b5cf6', 'p4pf+LO': '#1baf7a',
+              'shared-f': '#d14f2a', 'shared-f+LO': '#1baf7a'}
     markers = {'numba': 'o', 'numba+LO': 's', 'poselib': '^',
                'fundamental+gtK': 'o', 'varying-f': 'D',
                'varying-f+LO': 's', 'p3p+gtf': 'o', 'p4pf': 'D',
-               'p4pf+LO': 's'}
+               'p4pf+LO': 's', 'shared-f': 'P', 'shared-f+LO': 's'}
 
     fig, ax = plt.subplots(figsize=(7.5, 5.0), dpi=150, facecolor=surface)
     ax.set_facecolor(surface)

@@ -9,6 +9,7 @@ from estimators.absolute import estimate_absolute_pose
 from estimators.absolute_focal import estimate_absolute_pose_with_focal
 from estimators.essential import estimate_relative_pose
 from estimators.fundamental import estimate_fundamental
+from estimators.shared_focal import estimate_relative_pose_with_shared_focal
 from estimators.varying_focal import estimate_relative_pose_with_varying_focals
 
 
@@ -105,6 +106,23 @@ def warmup(problem="all", iterations=3, lo_iterations=1):
             lo_iterations=lo_iterations,
         )
 
+    if problem in ("all", "shared-focal"):
+        pp1 = np.array([500.0, 480.0])
+        pp2 = np.array([620.0, 510.0])
+        pixel_x1 = x1 * 1000.0 + pp1
+        pixel_x2 = x2 * 1000.0 + pp2
+        estimate_relative_pose_with_shared_focal(
+            pixel_x1,
+            pixel_x2,
+            pp1,
+            pp2,
+            iterations=iterations,
+            min_iterations=iterations,
+            max_error=2.0,
+            seed=0,
+            lo_iterations=lo_iterations,
+        )
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -113,7 +131,7 @@ def main(argv=None):
     parser.add_argument(
         "--problem",
         choices=("all", "fundamental", "essential", "absolute",
-                 "absolute-focal", "varying-focal"),
+                 "absolute-focal", "varying-focal", "shared-focal"),
         default="all",
         help="Subset of kernels to warm up.",
     )

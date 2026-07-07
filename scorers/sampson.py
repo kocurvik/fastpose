@@ -177,3 +177,22 @@ class VaryingFocalPoseSampsonScorer():
                         [0.0, 0.0, 1.0]])
         F = K2i.T @ E @ K1i
         return SampsonScorer.score_numpy(F, x1, x2, max_error)
+
+
+@njit(cache=True, fastmath=True)
+def shared_focal_pose_sampson_score(model, data, max_error_sq, best_score):
+    # Same model layout as varying-focal, but the shared-focal solver/refiner
+    # keeps model[12] == model[13].
+    return varying_focal_pose_sampson_score(model, data, max_error_sq,
+                                            best_score)
+
+
+class SharedFocalPoseSampsonScorer():
+    # truncated Sampson error for pose models [R | t | f | f], evaluated in
+    # image coordinates with fixed principal points.
+    score = staticmethod(shared_focal_pose_sampson_score)
+
+    @staticmethod
+    def score_numpy(R, t, f, pp1, pp2, x1, x2, max_error):
+        return VaryingFocalPoseSampsonScorer.score_numpy(
+            R, t, f, f, pp1, pp2, x1, x2, max_error)

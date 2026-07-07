@@ -4,6 +4,8 @@ Default run evaluates pose mAA(10) vs mean runtime for RANSAC iteration
 budgets [100, 200, 500, 1000] and writes the tradeoff plot to
 fundamental_maa.png; `python -m benchmarks.estimators.fundamental scaling`
 runs the runtime-scaling benchmark over match counts instead.
+`python -m benchmarks.estimators.fundamental shared-focal` evaluates the
+6-point shared-focal relative pose estimator.
 """
 
 import sys
@@ -12,11 +14,13 @@ import time
 import numpy as np
 
 from benchmarks.utils import (generate_data, generate_relpose_data, pose_maa,
+                              generate_shared_focal_relpose_data,
                               generate_varying_focal_relpose_data,
                               plot_maa_tradeoff, rotation_error_deg,
                               translation_error_deg)
 from estimators.essential import motion_from_essential
 from estimators.fundamental import estimate_fundamental
+from estimators.shared_focal import estimate_relative_pose_with_shared_focal
 from estimators.varying_focal import estimate_relative_pose_with_varying_focals
 from scorers.sampson import SampsonScorer
 
@@ -226,9 +230,105 @@ def evaluate_varying_focal_maa(num_scenes=100, num_samples=5000,
     return results
 
 
+def evaluate_shared_focal_maa(num_scenes=100, num_samples=5000,
+                              noise_sigma=2.0, outlier_ratio=0.3,
+                              iterations_list=(100, 200, 500, 1000),
+                              focal=1000.0, max_error=2.0,
+                              plot_path='shared_focal_maa.png'):
+    import poselib
+
+    print(f'generating {num_scenes} shared-focal scenes '
+          f'({num_samples} matches, {noise_sigma} px noise, {outlier_ratio:.0%} outliers)')
+
+    scenes = []
+    for i in range(num_scenes):
+        rng = np.random.default_rng(35000 + i)
+        x1, x2, R_gt, t_gt, pp1, pp2 = generate_shared_focal_relpose_data(
+            rng, num_samples, noise_sigma=noise_sigma,
+            outlier_ratio=outlier_ratio, focal=focal)
+        K1 = np.array([[focal, 0.0, pp1[0]], [0.0, focal, pp1[1]],
+                       [0.0, 0.0, 1.0]])
+        K2 = np.array([[focal, 0.0, pp2[0]], [0.0, focal, pp2[1]],
+                       [0.0, 0.0, 1.0]])
+        scenes.append((x1, x2, x1 - pp1, x2 - pp2,
+                       R_gt, t_gt, pp1, pp2, K1, K2))
+
+    estimate_fundamental(scenes[0][0][:100], scenes[0][1][:100],
+                         iterations=10, max_error=max_error)
+    estimate_relative_pose_with_shared_focal(
+        scenes[0][0][:100], scenes[0][1][:100], scenes[0][6], scenes[0][7],
+        iterations=10, max_error=max_error)
+
+    methods = ['fundamental+gtK', 'shared-f', 'shared-f+LO', 'poselib']
+    results = {m: {'runtime_ms': [], 'maa': []} for m in methods}
+
+    for iters in iterations_list:
+        errors = {m: [] for m in methods}
+        times = {m: [] for m in methods}
+        focal_errs = []
+        poselib_focal_errs = []
+        for si, (x1, x2, x1c, x2c, R_gt, t_gt, pp1, pp2, K1, K2) in enumerate(scenes):
+            start = time.perf_counter()
+            F, num_inliers, inliers = estimate_fundamental(
+                x1, x2, iterations=iters, max_error=max_error,
+                lo_iterations=None, seed=si)
+            times['fundamental+gtK'].append(time.perf_counter() - start)
+            errors['fundamental+gtK'].append(
+                _pose_error_from_f_two_k(F, inliers, x1, x2, K1, K2, R_gt, t_gt))
+
+            for method, lo in (('shared-f', 0), ('shared-f+LO', None)):
+                start = time.perf_counter()
+                R_est, t_est, f_est, num_inliers, inliers = (
+                    estimate_relative_pose_with_shared_focal(
+                        x1, x2, pp1, pp2, iterations=iters,
+                        max_error=max_error, lo_iterations=lo, seed=si))
+                times[method].append(time.perf_counter() - start)
+                if R_est is None:
+                    errors[method].append(180.0)
+                else:
+                    errors[method].append(max(rotation_error_deg(R_est, R_gt),
+                                              translation_error_deg(t_est, t_gt)))
+                    if method == 'shared-f+LO':
+                        focal_errs.append(abs(f_est - focal) / focal)
+
+            # poselib's shared-focal binding accepts a single principal point,
+            # so compare in principal-point-centered coordinates with pp = 0.
+            ransac_options = {'ransac': {'max_epipolar_error': max_error,
+                                         'min_iterations': iters,
+                                         'max_iterations': iters}}
+            start = time.perf_counter()
+            image_pair, info = poselib.estimate_shared_focal_relative_pose(
+                x1c, x2c, np.zeros(2), ransac_options)
+            times['poselib'].append(time.perf_counter() - start)
+            errors['poselib'].append(max(rotation_error_deg(image_pair.pose.R, R_gt),
+                                         translation_error_deg(image_pair.pose.t, t_gt)))
+            poselib_focal_errs.append(abs(image_pair.camera1.params[0] - focal) / focal)
+
+        print(f'--- {iters} iterations ---')
+        for m in methods:
+            rt = float(np.mean(times[m])) * 1000.0
+            maa = pose_maa(errors[m])
+            results[m]['runtime_ms'].append(rt)
+            results[m]['maa'].append(maa)
+            print(f'{m:15s} mAA(10)={maa:.4f}  mean runtime={rt:8.2f} ms')
+        if focal_errs:
+            print(f'shared-f+LO median focal error: {np.median(focal_errs):.3%}')
+        else:
+            print('shared-f+LO median focal error: no valid estimates')
+        print(f'poselib median focal error: {np.median(poselib_focal_errs):.3%}')
+
+    plot_maa_tradeoff(results, methods, iterations_list, plot_path,
+                      'Shared focal relative pose: accuracy vs runtime - '
+                      'point labels are RANSAC iterations')
+    print(f'\nplot written to {plot_path}')
+    return results
+
+
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'scaling':
         run_scaling_benchmark()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'shared-focal':
+        evaluate_shared_focal_maa()
     elif len(sys.argv) > 1 and sys.argv[1] == 'varying-focal':
         evaluate_varying_focal_maa()
     else:
