@@ -8,6 +8,8 @@ relative pose models [R | t] by assembling E = [t]_x R on the fly.
 import numpy as np
 from numba import njit
 
+from solvers.varying_focal import model_to_fundamental
+
 
 @njit(cache=True, fastmath=True)
 def sampson_score(f, data, max_error_sq, best_score):
@@ -122,3 +124,32 @@ class PoseSampsonScorer():
                       [t[2], 0.0, -t[0]],
                       [-t[1], t[0], 0.0]]) @ R
         return SampsonScorer.score_numpy(E, x1, x2, max_error)
+
+
+@njit(cache=True, fastmath=True)
+def varying_focal_pose_sampson_score(model, data, max_error_sq, best_score):
+    x1_x, x1_y, x2_x, x2_y, pp1x, pp1y, pp2x, pp2y = data
+    f = np.empty(9)
+    if not model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, f):
+        return 1e300, 0
+    return sampson_score(f, (x1_x, x1_y, x2_x, x2_y), max_error_sq, best_score)
+
+
+class VaryingFocalPoseSampsonScorer():
+    # truncated Sampson error for pose models [R | t | f1 | f2], evaluated
+    # in the original image coordinate system with fixed principal points.
+    score = staticmethod(varying_focal_pose_sampson_score)
+
+    @staticmethod
+    def score_numpy(R, t, f1, f2, pp1, pp2, x1, x2, max_error):
+        E = np.array([[0.0, -t[2], t[1]],
+                      [t[2], 0.0, -t[0]],
+                      [-t[1], t[0], 0.0]]) @ R
+        K1i = np.array([[1.0 / f1, 0.0, -pp1[0] / f1],
+                        [0.0, 1.0 / f1, -pp1[1] / f1],
+                        [0.0, 0.0, 1.0]])
+        K2i = np.array([[1.0 / f2, 0.0, -pp2[0] / f2],
+                        [0.0, 1.0 / f2, -pp2[1] / f2],
+                        [0.0, 0.0, 1.0]])
+        F = K2i.T @ E @ K1i
+        return SampsonScorer.score_numpy(F, x1, x2, max_error)

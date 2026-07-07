@@ -13,7 +13,7 @@ from scorers.sampson import SampsonScorer
 from solvers.fundamental import SevenPointSolver, seven_point
 
 
-def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0):
+def estimate_fundamental_numpy(x1, x2, iterations=1000, max_error=2.0):
     # pure-numpy reference RANSAC (no local optimization)
     x1n, x2n, T, scale = normalize_points(x1, x2)
     threshold = max_error * scale
@@ -48,9 +48,9 @@ def _get_default_estimator():
     return _default_estimator
 
 
-def estimate_fundamental_numba(x1, x2, iterations=1000, max_error=2.0, seed=None,
-                               min_iterations=None, success_prob=0.9999,
-                               lo_iterations=None):
+def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=None,
+                         min_iterations=None, success_prob=0.9999,
+                         lo_iterations=None):
     # params:
     # x1, x2 - (n, 2) arrays of corresponding points
     # iterations - maximum number of RANSAC iterations

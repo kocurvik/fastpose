@@ -14,7 +14,7 @@ import numpy as np
 from benchmarks.utils import (generate_relpose_data, pose_maa,
                               plot_maa_tradeoff, rotation_error_deg,
                               translation_error_deg)
-from estimators.essential import estimate_relative_pose_numba
+from estimators.essential import estimate_relative_pose
 
 
 def _pose_error(R_est, t_est, R_gt, t_gt):
@@ -23,8 +23,8 @@ def _pose_error(R_est, t_est, R_gt, t_gt):
     return max(rotation_error_deg(R_est, R_gt), translation_error_deg(t_est, t_gt))
 
 
-def evaluate_maa(num_scenes=100, num_samples=20000, noise_sigma=1.0,
-                 outlier_ratio=0.5, iterations_list=(100, 200, 500, 1000),
+def evaluate_maa(num_scenes=100, num_samples=5000, noise_sigma=4.0,
+                 outlier_ratio=0.2, iterations_list=(100, 200, 500, 1000),
                  focal=1000.0, image_size=2000.0, max_error=2.0,
                  plot_path='relpose_maa.png'):
     import poselib
@@ -44,8 +44,8 @@ def evaluate_maa(num_scenes=100, num_samples=20000, noise_sigma=1.0,
         scenes.append((x1, x2, (x1 - c) / focal, (x2 - c) / focal, R_gt, t_gt))
 
     # warm up the JIT so compilation time is not measured
-    estimate_relative_pose_numba(scenes[0][2][:100], scenes[0][3][:100],
-                                 iterations=10, max_error=max_error / focal)
+    estimate_relative_pose(scenes[0][2][:100], scenes[0][3][:100],
+                           iterations=10, max_error=max_error / focal)
 
     methods = ['numba', 'numba+LO', 'poselib']
     results = {m: {'runtime_ms': [], 'maa': []} for m in methods}
@@ -56,7 +56,7 @@ def evaluate_maa(num_scenes=100, num_samples=20000, noise_sigma=1.0,
         for si, (x1, x2, x1n, x2n, R_gt, t_gt) in enumerate(scenes):
             for method, lo in (('numba', 0), ('numba+LO', None)):
                 start = time.perf_counter()
-                R_est, t_est, num_inliers, inliers = estimate_relative_pose_numba(
+                R_est, t_est, num_inliers, inliers = estimate_relative_pose(
                     x1n, x2n, iterations=iters, max_error=max_error / focal,
                     lo_iterations=lo, seed=si)
                 err = _pose_error(R_est, t_est, R_gt, t_gt)
@@ -114,7 +114,7 @@ def run_scaling_benchmark():
     x1_w, x2_w, _, _ = generate_relpose_data(rng, 100)
     x1n_w = (x1_w - image_size / 2) / focal
     x2n_w = (x2_w - image_size / 2) / focal
-    estimate_relative_pose_numba(x1n_w, x2n_w, iterations=10, max_error=max_error / focal)
+    estimate_relative_pose(x1n_w, x2n_w, iterations=10, max_error=max_error / focal)
 
     for num_samples in [1000, 10000, 50000]:
         rng = np.random.default_rng(0)
@@ -127,7 +127,7 @@ def run_scaling_benchmark():
             times = []
             for _ in range(repeats):
                 start = time.perf_counter()
-                R_est, t_est, num_inliers, inliers = estimate_relative_pose_numba(
+                R_est, t_est, num_inliers, inliers = estimate_relative_pose(
                     x1n, x2n, iterations=iterations, max_error=max_error / focal,
                     lo_iterations=lo)
                 times.append(time.perf_counter() - start)

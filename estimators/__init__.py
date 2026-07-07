@@ -1,3 +1,4 @@
 from estimators.ransac import RansacEstimator, build_ransac
-from estimators.fundamental import estimate_fundamental, estimate_fundamental_numba
-from estimators.essential import estimate_relative_pose_numba, motion_from_essential
+from estimators.fundamental import estimate_fundamental_numpy, estimate_fundamental
+from estimators.essential import estimate_relative_pose, motion_from_essential
+from estimators.varying_focal import estimate_relative_pose_with_varying_focals

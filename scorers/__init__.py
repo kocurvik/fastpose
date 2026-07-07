@@ -1,2 +1,4 @@
 from scorers.sampson import (PoseSampsonScorer, SampsonScorer,
-                             pose_sampson_score, sampson_score)
+                             VaryingFocalPoseSampsonScorer,
+                             pose_sampson_score, sampson_score,
+                             varying_focal_pose_sampson_score)

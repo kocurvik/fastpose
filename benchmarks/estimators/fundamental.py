@@ -12,10 +12,12 @@ import time
 import numpy as np
 
 from benchmarks.utils import (generate_data, generate_relpose_data, pose_maa,
+                              generate_varying_focal_relpose_data,
                               plot_maa_tradeoff, rotation_error_deg,
                               translation_error_deg)
 from estimators.essential import motion_from_essential
-from estimators.fundamental import estimate_fundamental, estimate_fundamental_numba
+from estimators.fundamental import estimate_fundamental_numpy, estimate_fundamental
+from estimators.varying_focal import estimate_relative_pose_with_varying_focals
 from scorers.sampson import SampsonScorer
 
 
@@ -27,7 +29,17 @@ def _pose_error_from_f(F, inliers, x1n, x2n, K, R_gt, t_gt):
     return max(rotation_error_deg(R_est, R_gt), translation_error_deg(t_est, t_gt))
 
 
-def evaluate_maa(num_scenes=100, num_samples=20000, noise_sigma=1.0,
+def _pose_error_from_f_two_k(F, inliers, x1, x2, K1, K2, R_gt, t_gt):
+    if F is None or inliers is None or np.count_nonzero(inliers) == 0:
+        return 180.0
+    E = K2.T @ F @ K1
+    x1n = ((x1 - K1[:2, 2]) / K1[0, 0])
+    x2n = ((x2 - K2[:2, 2]) / K2[0, 0])
+    R_est, t_est = motion_from_essential(E, x1n[inliers], x2n[inliers])
+    return max(rotation_error_deg(R_est, R_gt), translation_error_deg(t_est, t_gt))
+
+
+def evaluate_maa(num_scenes=100, num_samples=5000, noise_sigma=3.0,
                  outlier_ratio=0.5, iterations_list=(100, 200, 500, 1000),
                  focal=1000.0, image_size=2000.0, max_error=2.0,
                  plot_path='fundamental_maa.png'):
@@ -47,8 +59,8 @@ def evaluate_maa(num_scenes=100, num_samples=20000, noise_sigma=1.0,
         scenes.append((x1, x2, (x1 - c) / focal, (x2 - c) / focal, R_gt, t_gt))
 
     # warm up the JIT so compilation time is not measured
-    estimate_fundamental_numba(scenes[0][0][:100], scenes[0][1][:100],
-                               iterations=10, max_error=max_error)
+    estimate_fundamental(scenes[0][0][:100], scenes[0][1][:100],
+                         iterations=10, max_error=max_error)
 
     methods = ['numba', 'numba+LO', 'poselib']
     results = {m: {'runtime_ms': [], 'maa': []} for m in methods}
@@ -59,7 +71,7 @@ def evaluate_maa(num_scenes=100, num_samples=20000, noise_sigma=1.0,
         for si, (x1, x2, x1n, x2n, R_gt, t_gt) in enumerate(scenes):
             for method, lo in (('numba', 0), ('numba+LO', None)):
                 start = time.perf_counter()
-                F, num_inliers, inliers = estimate_fundamental_numba(
+                F, num_inliers, inliers = estimate_fundamental(
                     x1, x2, iterations=iters, max_error=max_error,
                     lo_iterations=lo, seed=si)
                 times[method].append(time.perf_counter() - start)
@@ -112,26 +124,26 @@ def run_scaling_benchmark():
     # warm up the JIT so compilation time is not measured
     rng = np.random.default_rng(0)
     x1_w, x2_w = generate_data(rng, 100)
-    estimate_fundamental_numba(x1_w, x2_w, iterations=10)
+    estimate_fundamental(x1_w, x2_w, iterations=10)
 
     for num_samples in [1000, 10000, 50000]:
         rng = np.random.default_rng(0)
         x1, x2 = generate_data(rng, num_samples)
         print(f'=== {num_samples} matches, {iterations} iterations ===')
 
-        if num_samples <= 1000:
-            times = []
-            for _ in range(repeats):
-                start = time.perf_counter()
-                F, num_inliers, inliers = estimate_fundamental(
-                    x1, x2, iterations=iterations, max_error=max_error)
-                times.append(time.perf_counter() - start)
-            print(f'numpy:      {min(times):.4f}s, inliers={num_inliers}/{num_samples}')
+        # if num_samples <= 1000:
+        #     times = []
+        #     for _ in range(repeats):
+        #         start = time.perf_counter()
+        #         F, num_inliers, inliers = estimate_fundamental_numpy(
+        #             x1, x2, iterations=iterations, max_error=max_error)
+        #         times.append(time.perf_counter() - start)
+        #     print(f'numpy:      {min(times):.4f}s, inliers={num_inliers}/{num_samples}')
 
         times = []
         for _ in range(repeats):
             start = time.perf_counter()
-            F, num_inliers, inliers = estimate_fundamental_numba(
+            F, num_inliers, inliers = estimate_fundamental(
                 x1, x2, iterations=iterations, max_error=max_error, lo_iterations=0)
             times.append(time.perf_counter() - start)
         print(f'numba:      {min(times):.4f}s, inliers={num_inliers}/{num_samples}')
@@ -139,7 +151,7 @@ def run_scaling_benchmark():
         times = []
         for _ in range(repeats):
             start = time.perf_counter()
-            F, num_inliers, inliers = estimate_fundamental_numba(
+            F, num_inliers, inliers = estimate_fundamental(
                 x1, x2, iterations=iterations, max_error=max_error)
             times.append(time.perf_counter() - start)
         print(f'numba+LO:   {min(times):.4f}s, inliers={num_inliers}/{num_samples}')
@@ -153,8 +165,80 @@ def run_scaling_benchmark():
         print()
 
 
+def evaluate_varying_focal_maa(num_scenes=100, num_samples=5000,
+                               noise_sigma=2.0, outlier_ratio=0.3,
+                               iterations_list=(100, 200, 500, 1000),
+                               focal1=800.0, focal2=1300.0,
+                               max_error=2.0,
+                               plot_path='varying_focal_maa.png'):
+    print(f'generating {num_scenes} varying-focal scenes '
+          f'({num_samples} matches, {noise_sigma} px noise, {outlier_ratio:.0%} outliers)')
+
+    scenes = []
+    for i in range(num_scenes):
+        rng = np.random.default_rng(30000 + i)
+        x1, x2, R_gt, t_gt, pp1, pp2 = generate_varying_focal_relpose_data(
+            rng, num_samples, noise_sigma=noise_sigma,
+            outlier_ratio=outlier_ratio, focal1=focal1, focal2=focal2)
+        K1 = np.array([[focal1, 0.0, pp1[0]], [0.0, focal1, pp1[1]],
+                       [0.0, 0.0, 1.0]])
+        K2 = np.array([[focal2, 0.0, pp2[0]], [0.0, focal2, pp2[1]],
+                       [0.0, 0.0, 1.0]])
+        scenes.append((x1, x2, R_gt, t_gt, pp1, pp2, K1, K2))
+
+    estimate_fundamental(scenes[0][0][:100], scenes[0][1][:100],
+                         iterations=10, max_error=max_error)
+    estimate_relative_pose_with_varying_focals(
+        scenes[0][0][:100], scenes[0][1][:100], scenes[0][4], scenes[0][5],
+        iterations=10, max_error=max_error)
+
+    methods = ['fundamental+gtK', 'varying-f', 'varying-f+LO']
+    results = {m: {'runtime_ms': [], 'maa': []} for m in methods}
+
+    for iters in iterations_list:
+        errors = {m: [] for m in methods}
+        times = {m: [] for m in methods}
+        for si, (x1, x2, R_gt, t_gt, pp1, pp2, K1, K2) in enumerate(scenes):
+            start = time.perf_counter()
+            F, num_inliers, inliers = estimate_fundamental(
+                x1, x2, iterations=iters, max_error=max_error,
+                lo_iterations=None, seed=si)
+            times['fundamental+gtK'].append(time.perf_counter() - start)
+            errors['fundamental+gtK'].append(
+                _pose_error_from_f_two_k(F, inliers, x1, x2, K1, K2, R_gt, t_gt))
+
+            for method, lo in (('varying-f', 0), ('varying-f+LO', None)):
+                start = time.perf_counter()
+                R_est, t_est, f1, f2, num_inliers, inliers = (
+                    estimate_relative_pose_with_varying_focals(
+                        x1, x2, pp1, pp2, iterations=iters,
+                        max_error=max_error, lo_iterations=lo, seed=si))
+                times[method].append(time.perf_counter() - start)
+                if R_est is None:
+                    errors[method].append(180.0)
+                else:
+                    errors[method].append(max(rotation_error_deg(R_est, R_gt),
+                                              translation_error_deg(t_est, t_gt)))
+
+        print(f'--- {iters} iterations ---')
+        for m in methods:
+            rt = float(np.mean(times[m])) * 1000.0
+            maa = pose_maa(errors[m])
+            results[m]['runtime_ms'].append(rt)
+            results[m]['maa'].append(maa)
+            print(f'{m:15s} mAA(10)={maa:.4f}  mean runtime={rt:8.2f} ms')
+
+    plot_maa_tradeoff(results, methods, iterations_list, plot_path,
+                      'Varying focal relative pose: accuracy vs runtime - '
+                      'point labels are RANSAC iterations')
+    print(f'\nplot written to {plot_path}')
+    return results
+
+
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'scaling':
         run_scaling_benchmark()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'varying-focal':
+        evaluate_varying_focal_maa()
     else:
         evaluate_maa()

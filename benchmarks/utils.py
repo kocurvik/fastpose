@@ -132,6 +132,30 @@ def generate_relpose_data(rng, num_samples, noise_sigma=1.0, outlier_ratio=0.2,
     return x1, x2, R, t
 
 
+def generate_varying_focal_relpose_data(rng, num_samples, noise_sigma=1.0,
+                                        outlier_ratio=0.2, focal1=800.0,
+                                        focal2=1300.0, pp1=(500.0, 480.0),
+                                        pp2=(620.0, 510.0)):
+    # synthetic two-view correspondences with different focal lengths and
+    # known principal points. Noise is added in second-image pixel units.
+    y1, y2, R, t = generate_relpose_data(
+        rng, num_samples, noise_sigma=0.0, outlier_ratio=0.0,
+        focal=1.0, image_size=2.0)
+    pp1 = np.asarray(pp1, dtype=np.float64)
+    pp2 = np.asarray(pp2, dtype=np.float64)
+    x1 = focal1 * (y1 - 1.0) + pp1
+    x2 = focal2 * (y2 - 1.0) + pp2
+    x2 += rng.normal(scale=noise_sigma, size=x2.shape)
+
+    num_outliers = int(num_samples * outlier_ratio)
+    if num_outliers:
+        outlier_idxs = rng.choice(num_samples, num_outliers, replace=False)
+        x2[outlier_idxs, 0] = rng.uniform(0.0, 2.0 * pp2[0], size=num_outliers)
+        x2[outlier_idxs, 1] = rng.uniform(0.0, 2.0 * pp2[1], size=num_outliers)
+
+    return x1, x2, R, t, pp1, pp2
+
+
 def generate_exact_fundamental_sample(rng, num_samples=7):
     # noise-free correspondences in [-1, 1]^2 for a random rank-2 F
     F = _random_rank2_f(rng)
@@ -221,8 +245,12 @@ def plot_maa_tradeoff(results, methods, iterations_list, path, title):
     muted = '#898781'
     grid = '#e1e0d9'
     baseline = '#c3c2b7'
-    colors = {'numba': '#2a78d6', 'numba+LO': '#1baf7a', 'poselib': '#eda100'}
-    markers = {'numba': 'o', 'numba+LO': 's', 'poselib': '^'}
+    colors = {'numba': '#2a78d6', 'numba+LO': '#1baf7a', 'poselib': '#eda100',
+              'fundamental+gtK': '#2a78d6', 'varying-f': '#8b5cf6',
+              'varying-f+LO': '#1baf7a'}
+    markers = {'numba': 'o', 'numba+LO': 's', 'poselib': '^',
+               'fundamental+gtK': 'o', 'varying-f': 'D',
+               'varying-f+LO': 's'}
 
     fig, ax = plt.subplots(figsize=(7.5, 5.0), dpi=150, facecolor=surface)
     ax.set_facecolor(surface)

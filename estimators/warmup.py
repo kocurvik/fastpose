@@ -5,8 +5,9 @@ import time
 
 import numpy as np
 
-from estimators.essential import estimate_relative_pose_numba
-from estimators.fundamental import estimate_fundamental_numba
+from estimators.essential import estimate_relative_pose
+from estimators.fundamental import estimate_fundamental
+from estimators.varying_focal import estimate_relative_pose_with_varying_focals
 
 
 def _synthetic_correspondences(num_points=32):
@@ -36,7 +37,7 @@ def warmup(problem="all", iterations=3, lo_iterations=1):
     if problem in ("all", "fundamental"):
         pixel_x1 = x1 * 1000.0 + 500.0
         pixel_x2 = x2 * 1000.0 + 500.0
-        estimate_fundamental_numba(
+        estimate_fundamental(
             pixel_x1,
             pixel_x2,
             iterations=iterations,
@@ -47,12 +48,29 @@ def warmup(problem="all", iterations=3, lo_iterations=1):
         )
 
     if problem in ("all", "essential"):
-        estimate_relative_pose_numba(
+        estimate_relative_pose(
             x1,
             x2,
             iterations=iterations,
             min_iterations=iterations,
             max_error=0.002,
+            seed=0,
+            lo_iterations=lo_iterations,
+        )
+
+    if problem in ("all", "varying-focal"):
+        pp1 = np.array([500.0, 480.0])
+        pp2 = np.array([620.0, 510.0])
+        pixel_x1 = x1 * 800.0 + pp1
+        pixel_x2 = x2 * 1300.0 + pp2
+        estimate_relative_pose_with_varying_focals(
+            pixel_x1,
+            pixel_x2,
+            pp1,
+            pp2,
+            iterations=iterations,
+            min_iterations=iterations,
+            max_error=2.0,
             seed=0,
             lo_iterations=lo_iterations,
         )
@@ -64,7 +82,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "--problem",
-        choices=("all", "fundamental", "essential"),
+        choices=("all", "fundamental", "essential", "varying-focal"),
         default="all",
         help="Subset of kernels to warm up.",
     )
