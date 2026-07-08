@@ -5,3 +5,7 @@ from estimators.varying_focal import estimate_relative_pose_with_varying_focals
 from estimators.shared_focal import estimate_relative_pose_with_shared_focal
 from estimators.absolute import estimate_absolute_pose
 from estimators.absolute_focal import estimate_absolute_pose_with_focal
+from estimators.monodepth import (
+    estimate_relative_pose_with_monodepth,
+    estimate_shared_focal_relative_pose_with_monodepth,
+    estimate_varying_focal_relative_pose_with_monodepth)

@@ -9,6 +9,10 @@ from estimators.absolute import estimate_absolute_pose
 from estimators.absolute_focal import estimate_absolute_pose_with_focal
 from estimators.essential import estimate_relative_pose
 from estimators.fundamental import estimate_fundamental
+from estimators.monodepth import (
+    estimate_relative_pose_with_monodepth,
+    estimate_shared_focal_relative_pose_with_monodepth,
+    estimate_varying_focal_relative_pose_with_monodepth)
 from estimators.shared_focal import estimate_relative_pose_with_shared_focal
 from estimators.varying_focal import estimate_relative_pose_with_varying_focals
 
@@ -123,6 +127,57 @@ def warmup(problem="all", iterations=3, lo_iterations=1):
             lo_iterations=lo_iterations,
         )
 
+    if problem in ("all", "monodepth"):
+        rng = np.random.default_rng(0)
+        depth1 = rng.uniform(3.0, 6.0, size=len(x1))
+        world = np.column_stack([x1 * depth1[:, None], depth1])
+        # exact depths of the warmup pose in camera 2 (R, t from
+        # _synthetic_correspondences)
+        angle = np.deg2rad(4.0)
+        ca = np.cos(angle)
+        sa = np.sin(angle)
+        R = np.array([[ca, 0.0, sa],
+                      [0.0, 1.0, 0.0],
+                      [-sa, 0.0, ca]], dtype=np.float64)
+        t = np.array([0.25, 0.02, 0.01], dtype=np.float64)
+        depth2 = (world @ R.T + t)[:, 2]
+
+        for estimate_shift in (False, True):
+            estimate_relative_pose_with_monodepth(
+                x1,
+                x2,
+                depth1,
+                depth2,
+                estimate_shift=estimate_shift,
+                iterations=iterations,
+                min_iterations=iterations,
+                max_error=0.002,
+                seed=0,
+                lo_iterations=lo_iterations,
+            )
+        estimate_shared_focal_relative_pose_with_monodepth(
+            x1 * 1000.0,
+            x2 * 1000.0,
+            depth1,
+            depth2,
+            iterations=iterations,
+            min_iterations=iterations,
+            max_error=2.0,
+            seed=0,
+            lo_iterations=lo_iterations,
+        )
+        estimate_varying_focal_relative_pose_with_monodepth(
+            x1 * 1000.0,
+            x2 * 1000.0,
+            depth1,
+            depth2,
+            iterations=iterations,
+            min_iterations=iterations,
+            max_error=2.0,
+            seed=0,
+            lo_iterations=lo_iterations,
+        )
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -131,7 +186,8 @@ def main(argv=None):
     parser.add_argument(
         "--problem",
         choices=("all", "fundamental", "essential", "absolute",
-                 "absolute-focal", "varying-focal", "shared-focal"),
+                 "absolute-focal", "varying-focal", "shared-focal",
+                 "monodepth"),
         default="all",
         help="Subset of kernels to warm up.",
     )

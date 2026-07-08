@@ -1,0 +1,203 @@
+"""Relative pose estimation with monocular depth estimates (MDE priors).
+
+Three pipelines on the shared LO-RANSAC engine, following poselib's
+monodepth estimators:
+
+- `estimate_relative_pose_with_monodepth`: calibrated cameras. With
+  `estimate_shift=False` (scale-invariant depths) the minimal solver is
+  P3P on the depth-induced 3D points; with `estimate_shift=True`
+  (affine-invariant depths) the 3-point solver additionally recovers one
+  depth shift per image.
+- `estimate_shared_focal_relative_pose_with_monodepth`: unknown focal
+  length shared by both cameras, pixel coordinates with known principal
+  points.
+- `estimate_varying_focal_relative_pose_with_monodepth`: two unknown focal
+  lengths.
+
+Scoring is the truncated Sampson error (threshold `max_error`, in pixels
+for the focal problems and calibrated units for the calibrated one);
+local optimization minimizes the hybrid cost of the Sampson error
+(weighted by `weight_sampson`) and the symmetric monodepth reprojection
+error, whose threshold `max_reproj_error` sets the relative weighting
+`scale_reproj = max_error^2 / max_reproj_error^2` like poselib's
+`max_errors = [reproj, epipolar]` pair.
+"""
+
+import numpy as np
+
+from estimators.ransac import RansacEstimator
+from refiners.monodepth import (LMMonoDepthPoseRefiner,
+                                LMMonoDepthSharedFocalPoseRefiner,
+                                LMMonoDepthShiftPoseRefiner,
+                                LMMonoDepthVaryingFocalPoseRefiner)
+from scorers.sampson import (MonoDepthFocalPoseSampsonScorer,
+                             MonoDepthPoseSampsonScorer)
+from solvers.monodepth import (MonoDepthP3PSolver, MonoDepthSharedFocalSolver,
+                               MonoDepthShiftSolver,
+                               MonoDepthVaryingFocalSolver)
+
+_estimators = {}
+
+
+def _get_estimator(kind):
+    if kind not in _estimators:
+        if kind == 'calibrated':
+            _estimators[kind] = RansacEstimator(MonoDepthP3PSolver(),
+                                                MonoDepthPoseSampsonScorer(),
+                                                LMMonoDepthPoseRefiner())
+        elif kind == 'calibrated-shift':
+            _estimators[kind] = RansacEstimator(MonoDepthShiftSolver(),
+                                                MonoDepthPoseSampsonScorer(),
+                                                LMMonoDepthShiftPoseRefiner())
+        elif kind == 'shared-focal':
+            _estimators[kind] = RansacEstimator(
+                MonoDepthSharedFocalSolver(),
+                MonoDepthFocalPoseSampsonScorer(),
+                LMMonoDepthSharedFocalPoseRefiner())
+        else:
+            _estimators[kind] = RansacEstimator(
+                MonoDepthVaryingFocalSolver(),
+                MonoDepthFocalPoseSampsonScorer(),
+                LMMonoDepthVaryingFocalPoseRefiner())
+    return _estimators[kind]
+
+
+def _monodepth_data(x1, x2, d1, d2, scale_reproj, weight_sampson):
+    return (np.ascontiguousarray(x1[:, 0]), np.ascontiguousarray(x1[:, 1]),
+            np.ascontiguousarray(x2[:, 0]), np.ascontiguousarray(x2[:, 1]),
+            np.ascontiguousarray(d1), np.ascontiguousarray(d2),
+            float(scale_reproj), float(weight_sampson))
+
+
+def _check_inputs(x1, x2, d1, d2):
+    x1 = np.ascontiguousarray(x1, dtype=np.float64)
+    x2 = np.ascontiguousarray(x2, dtype=np.float64)
+    d1 = np.ascontiguousarray(d1, dtype=np.float64).ravel()
+    d2 = np.ascontiguousarray(d2, dtype=np.float64).ravel()
+    if not (len(x1) == len(x2) == len(d1) == len(d2)):
+        raise ValueError("x1, x2, d1 and d2 must have the same length")
+    return x1, x2, d1, d2
+
+
+def _scale_reproj(max_error, max_reproj_error):
+    if max_reproj_error is None or max_reproj_error <= 0.0:
+        return 0.0
+    return (max_error * max_error) / (max_reproj_error * max_reproj_error)
+
+
+def _principal_point(pp):
+    if pp is None:
+        return np.zeros(2, dtype=np.float64)
+    arr = np.asarray(pp, dtype=np.float64)
+    if arr.shape != (2,):
+        raise ValueError("principal points must be length-2 arrays")
+    return arr
+
+
+def estimate_relative_pose_with_monodepth(
+        x1, x2, d1, d2, estimate_shift=False, iterations=1000, max_error=0.002,
+        max_reproj_error=0.016, weight_sampson=1.0, seed=None,
+        min_iterations=None, success_prob=0.9999, lo_iterations=None):
+    # params:
+    # x1, x2 - (n, 2) arrays of *calibrated* image points
+    # d1, d2 - (n,) monocular depths per image (scale-invariant, or
+    #          affine-invariant with estimate_shift=True)
+    # estimate_shift - also estimate one depth shift per image (the depths
+    #          enter as d + shift)
+    # max_error - truncated Sampson threshold in calibrated units
+    # max_reproj_error - reprojection threshold (same units) that sets the
+    #          hybrid LO weighting; None or 0 disables the reprojection term
+    # weight_sampson - weight of the Sampson term in the hybrid LO cost
+    # returns R, t, scale, shift1, shift2, num_inliers, inliers with
+    # scale * (d2 + shift2) * x2h = R ((d1 + shift1) * x1h) + t for inliers
+    x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    data = _monodepth_data(x1, x2, d1, d2,
+                           _scale_reproj(max_error, max_reproj_error),
+                           weight_sampson)
+
+    estimator = _get_estimator('calibrated-shift' if estimate_shift
+                               else 'calibrated')
+    model, score, num_inliers, _ = estimator.estimate(
+        data, len(x1), max_error, iterations=iterations,
+        min_iterations=min_iterations, success_prob=success_prob,
+        lo_iterations=lo_iterations, seed=seed)
+
+    if num_inliers == 0:
+        return None, None, None, None, None, 0, None
+
+    R = model[:9].reshape(3, 3).copy()
+    t = model[9:12].copy()
+    scale = float(model[12])
+    shift1 = float(model[13])
+    shift2 = float(model[14])
+    _, inliers, num_inliers = MonoDepthPoseSampsonScorer.score_numpy(
+        R, t, x1, x2, max_error)
+    return R, t, scale, shift1, shift2, num_inliers, inliers
+
+
+def estimate_shared_focal_relative_pose_with_monodepth(
+        x1, x2, d1, d2, principal_point1=None, principal_point2=None,
+        iterations=1000, max_error=2.0, max_reproj_error=16.0,
+        weight_sampson=1.0, seed=None, min_iterations=None,
+        success_prob=0.9999, lo_iterations=None):
+    # x1, x2 in pixel coordinates, one unknown square-pixel focal length
+    # shared by both cameras; principal_point* optional (cx, cy), zero if
+    # omitted. Thresholds in pixels. Returns
+    # R, t, f, scale, num_inliers, inliers.
+    x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    x1c = x1 - _principal_point(principal_point1)
+    x2c = x2 - _principal_point(principal_point2)
+    data = _monodepth_data(x1c, x2c, d1, d2,
+                           _scale_reproj(max_error, max_reproj_error),
+                           weight_sampson)
+
+    estimator = _get_estimator('shared-focal')
+    model, score, num_inliers, _ = estimator.estimate(
+        data, len(x1), max_error, iterations=iterations,
+        min_iterations=min_iterations, success_prob=success_prob,
+        lo_iterations=lo_iterations, seed=seed)
+
+    if num_inliers == 0:
+        return None, None, None, None, 0, None
+
+    R = model[:9].reshape(3, 3).copy()
+    t = model[9:12].copy()
+    f = float(model[12])
+    scale = float(model[14])
+    _, inliers, num_inliers = MonoDepthFocalPoseSampsonScorer.score_numpy(
+        R, t, f, f, x1c, x2c, max_error)
+    return R, t, f, scale, num_inliers, inliers
+
+
+def estimate_varying_focal_relative_pose_with_monodepth(
+        x1, x2, d1, d2, principal_point1=None, principal_point2=None,
+        iterations=1000, max_error=2.0, max_reproj_error=16.0,
+        weight_sampson=1.0, seed=None, min_iterations=None,
+        success_prob=0.9999, lo_iterations=None):
+    # x1, x2 in pixel coordinates, one unknown square-pixel focal length per
+    # camera; principal_point* optional (cx, cy), zero if omitted.
+    # Thresholds in pixels. Returns R, t, f1, f2, scale, num_inliers, inliers.
+    x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    x1c = x1 - _principal_point(principal_point1)
+    x2c = x2 - _principal_point(principal_point2)
+    data = _monodepth_data(x1c, x2c, d1, d2,
+                           _scale_reproj(max_error, max_reproj_error),
+                           weight_sampson)
+
+    estimator = _get_estimator('varying-focal')
+    model, score, num_inliers, _ = estimator.estimate(
+        data, len(x1), max_error, iterations=iterations,
+        min_iterations=min_iterations, success_prob=success_prob,
+        lo_iterations=lo_iterations, seed=seed)
+
+    if num_inliers == 0:
+        return None, None, None, None, None, 0, None
+
+    R = model[:9].reshape(3, 3).copy()
+    t = model[9:12].copy()
+    f1 = float(model[12])
+    f2 = float(model[13])
+    scale = float(model[14])
+    _, inliers, num_inliers = MonoDepthFocalPoseSampsonScorer.score_numpy(
+        R, t, f1, f2, x1c, x2c, max_error)
+    return R, t, f1, f2, scale, num_inliers, inliers

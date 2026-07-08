@@ -168,6 +168,73 @@ def generate_shared_focal_relpose_data(rng, num_samples, noise_sigma=1.0,
         pp1=pp1, pp2=pp2)
 
 
+def generate_monodepth_relpose_data(rng, num_samples, noise_sigma=1.0,
+                                    outlier_ratio=0.2, depth_noise=0.0,
+                                    focal1=1000.0, focal2=1000.0,
+                                    pp1=(0.0, 0.0), pp2=(0.0, 0.0),
+                                    alpha1=1.0, beta1=0.0,
+                                    alpha2=1.0, beta2=0.0):
+    # synthetic two-view correspondences with monocular depth estimates.
+    # The returned depths are affine corruptions d_i = alpha_i * z_i + beta_i
+    # of the true depths (relative multiplicative noise `depth_noise` on z
+    # before the affine map), so ground truth scale = alpha1 / alpha2 and
+    # shift_i = beta_i / alpha_i (the model uses d + shift = alpha * z for
+    # exact data). Pixel noise and outliers only corrupt x2, like the other
+    # generators. Returns x1, x2, d1, d2, R, t.
+    pp1 = np.asarray(pp1, dtype=np.float64)
+    pp2 = np.asarray(pp2, dtype=np.float64)
+
+    axis = rng.normal(size=3)
+    axis /= np.linalg.norm(axis)
+    angle = 0.2
+    K = np.array([[0.0, -axis[2], axis[1]],
+                  [axis[2], 0.0, -axis[0]],
+                  [-axis[1], axis[0], 0.0]])
+    R = np.eye(3) + math.sin(angle) * K + (1.0 - math.cos(angle)) * (K @ K)
+    t = rng.normal(size=3)
+    t *= 0.5 / np.linalg.norm(t)
+
+    x1n = np.empty((0, 2))
+    x2n = np.empty((0, 2))
+    z1 = np.empty(0)
+    z2 = np.empty(0)
+    while len(x1n) < num_samples:
+        m = 2 * num_samples
+        xn = rng.uniform(-0.45, 0.45, size=(m, 2))
+        depth = rng.uniform(4.0, 10.0, size=m)
+        X = np.column_stack([xn * depth[:, None], depth])
+        X2 = X @ R.T + t
+        proj = X2[:, :2] / X2[:, 2:3]
+        valid = (X2[:, 2] > 0.5) & (np.abs(proj[:, 0]) < 0.48) & (np.abs(proj[:, 1]) < 0.48)
+        x1n = np.concatenate([x1n, xn[valid]])
+        x2n = np.concatenate([x2n, proj[valid]])
+        z1 = np.concatenate([z1, depth[valid]])
+        z2 = np.concatenate([z2, X2[valid, 2]])
+    x1n = x1n[:num_samples]
+    x2n = x2n[:num_samples]
+    z1 = z1[:num_samples]
+    z2 = z2[:num_samples]
+
+    x1 = focal1 * x1n + pp1
+    x2 = focal2 * x2n + pp2
+    x2 += rng.normal(scale=noise_sigma, size=x2.shape)
+
+    if depth_noise > 0.0:
+        z1 = z1 * (1.0 + rng.normal(scale=depth_noise, size=num_samples))
+        z2 = z2 * (1.0 + rng.normal(scale=depth_noise, size=num_samples))
+    d1 = alpha1 * z1 + beta1
+    d2 = alpha2 * z2 + beta2
+
+    num_outliers = int(num_samples * outlier_ratio)
+    if num_outliers:
+        outlier_idxs = rng.choice(num_samples, num_outliers, replace=False)
+        x2[outlier_idxs, 0] = pp2[0] + focal2 * rng.uniform(-0.48, 0.48, size=num_outliers)
+        x2[outlier_idxs, 1] = pp2[1] + focal2 * rng.uniform(-0.48, 0.48, size=num_outliers)
+        d2[outlier_idxs] = alpha2 * rng.uniform(4.0, 10.0, size=num_outliers) + beta2
+
+    return x1, x2, d1, d2, R, t
+
+
 def generate_abspose_data(rng, num_samples, noise_sigma=1.0, outlier_ratio=0.2,
                           focal=1000.0, image_size=2000.0):
     # synthetic 2D-3D correspondences in pixel coordinates with a known
@@ -296,6 +363,16 @@ def plot_maa_tradeoff(results, methods, iterations_list, path, title):
                'fundamental+gtK': 'o', 'varying-f': 'D',
                'varying-f+LO': 's', 'p3p+gtf': 'o', 'p4pf': 'D',
                'p4pf+LO': 's', 'shared-f': 'P', 'shared-f+LO': 's'}
+    # fallbacks for methods without a fixed style (cycled deterministically)
+    fallback_colors = ['#2a78d6', '#8b5cf6', '#1baf7a', '#d14f2a', '#0f766e']
+    fallback_markers = ['o', 'D', 's', 'P', 'v']
+    for i, m in enumerate(sorted(set(methods) - set(colors))):
+        if 'poselib' in m:
+            colors[m] = '#eda100'
+            markers[m] = '^' if m.endswith('poselib') or i % 2 == 0 else 'x'
+        else:
+            colors[m] = fallback_colors[i % len(fallback_colors)]
+            markers[m] = fallback_markers[i % len(fallback_markers)]
 
     fig, ax = plt.subplots(figsize=(7.5, 5.0), dpi=150, facecolor=surface)
     ax.set_facecolor(surface)

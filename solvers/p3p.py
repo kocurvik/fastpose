@@ -126,29 +126,12 @@ def _write_pose(xs, Xs, X01, X02, XXinv, d0, d1, d2, pose):
 
 
 @njit(cache=True, fastmath=True)
-def _solve_p3p(data, sample, models, workspace):
-    x_x, x_y, X_x, X_y, X_z = data
-    xs = workspace[0:9].reshape(3, 3)
-    Xs = workspace[9:18].reshape(3, 3)
-    X01 = workspace[18:21]
-    X02 = workspace[21:24]
-    XXinv = workspace[24:33].reshape(3, 3)
-    C = workspace[33:42].reshape(3, 3)
-    pq = workspace[42:48].reshape(2, 3)
-    taus = workspace[48:50]
-
-    for k in range(3):
-        i = sample[k]
-        nx = x_x[i]
-        ny = x_y[i]
-        inv = 1.0 / math.sqrt(nx * nx + ny * ny + 1.0)
-        xs[k, 0] = nx * inv
-        xs[k, 1] = ny * inv
-        xs[k, 2] = inv
-        Xs[k, 0] = X_x[i]
-        Xs[k, 1] = X_y[i]
-        Xs[k, 2] = X_z[i]
-
+def _p3p_impl(xs, Xs, X01, X02, XXinv, C, pq, taus, models):
+    # P3P core on prepared buffers: xs (3, 3) unit bearing vectors, Xs (3, 3)
+    # 3D points (both mutated - the points are reordered internally), the
+    # rest scratch. Writes up to 4 poses into models[count, 0:12] and returns
+    # their count. Kept separate from the data/sample plumbing so other
+    # problems (e.g. monodepth relative pose) can reuse the solver.
     a01 = 0.0
     a02 = 0.0
     a12 = 0.0
@@ -357,6 +340,33 @@ def _solve_p3p(data, sample, models, workspace):
             break
 
     return count
+
+
+@njit(cache=True, fastmath=True)
+def _solve_p3p(data, sample, models, workspace):
+    x_x, x_y, X_x, X_y, X_z = data
+    xs = workspace[0:9].reshape(3, 3)
+    Xs = workspace[9:18].reshape(3, 3)
+    X01 = workspace[18:21]
+    X02 = workspace[21:24]
+    XXinv = workspace[24:33].reshape(3, 3)
+    C = workspace[33:42].reshape(3, 3)
+    pq = workspace[42:48].reshape(2, 3)
+    taus = workspace[48:50]
+
+    for k in range(3):
+        i = sample[k]
+        nx = x_x[i]
+        ny = x_y[i]
+        inv = 1.0 / math.sqrt(nx * nx + ny * ny + 1.0)
+        xs[k, 0] = nx * inv
+        xs[k, 1] = ny * inv
+        xs[k, 2] = inv
+        Xs[k, 0] = X_x[i]
+        Xs[k, 1] = X_y[i]
+        Xs[k, 2] = X_z[i]
+
+    return _p3p_impl(xs, Xs, X01, X02, XXinv, C, pq, taus, models)
 
 
 class P3PSolver():

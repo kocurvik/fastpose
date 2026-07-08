@@ -30,21 +30,24 @@ specialized per problem by `RansacEstimator(solver, scorer, refiner)`.
 ```
 solvers/       minimal solvers: 7-point F, 5-point E, 7-point varying-focal
                and 6-point shared-focal relative pose, P3P and P4Pf absolute
-               pose; shared helpers in solvers/utils.py
+               pose, four 3-point monodepth relative pose variants; shared
+               helpers in solvers/utils.py
 scorers/       robust scorers: truncated Sampson (MSAC) for flat 3x3 models,
-               for pose models [R|t] (E = [t]_x R assembled on the fly) and
-               for varying/shared-focal pose models [R|t|f1|f2]; truncated
-               reprojection error for absolute pose models [R|t] and
-               unknown-focal models [R|t|f]
+               for pose models [R|t] (E = [t]_x R assembled on the fly), for
+               varying/shared-focal pose models [R|t|f1|f2] and for the
+               monodepth model layouts; truncated reprojection error for
+               absolute pose models [R|t] and unknown-focal models [R|t|f]
 refiners/      local optimization; refiners/lm.py is the generic LM engine,
                refiners/utils.py the shared factorization/jacobian machinery,
                refiners/{fundamental,essential,varying_focal,shared_focal,
-               absolute,absolute_focal}.py the per-problem kernels
+               absolute,absolute_focal,monodepth}.py the per-problem kernels
 estimators/    the RANSAC engine (estimators/ransac.py) and the full pipelines
                estimate_fundamental / estimate_relative_pose /
                estimate_relative_pose_with_varying_focals /
                estimate_relative_pose_with_shared_focal /
-               estimate_absolute_pose / estimate_absolute_pose_with_focal;
+               estimate_absolute_pose / estimate_absolute_pose_with_focal /
+               estimate_relative_pose_with_monodepth /
+               estimate_{shared,varying}_focal_relative_pose_with_monodepth;
                shared helpers in estimators/utils.py
 benchmarks/    benchmarks/estimators compares against poselib (mAA + runtime
                scaling); benchmarks/solvers evaluates solver accuracy on
@@ -230,6 +233,57 @@ principal points:
   rotation (3), translation direction (2) and one shared log-focal — with
   the Sampson jacobian built like the varying-focal refiner.
 
+## Monodepth relative pose backends
+
+Relative pose from correspondences plus per-image monocular depth
+estimates (scale- or affine-invariant MDE outputs), following poselib's
+monodepth estimators. The depth convention is poselib's
+`MonoDepthTwoViewGeometry`: the 3D point of correspondence i is
+`(d1_i + shift1) x1h_i` in camera 1 and `scale (d2_i + shift2) x2h_i` in
+camera 2. Four 3-point minimal solvers (`solvers/monodepth.py`):
+
+- **Calibrated without shift** (`estimate_relative_pose_with_monodepth`,
+  scale-invariant depths): 3D points from the camera-1 depths, absolute
+  pose of camera 2 via the shared P3P kernel, depth scale from the first
+  correspondence. Models `[R | t | scale | 0 | 0]` with metric t.
+- **Calibrated with shift** (`estimate_shift=True`, affine-invariant
+  depths): port of poselib's `relpose_monodepth_3pt` — the problem reduces
+  to a quartic in the camera-1 shift, polished with Gauss-Newton on the
+  three pairwise distance constraints; also recovers one depth shift per
+  image. Models `[R | t | scale | shift1 | shift2]`.
+- **Shared focal** (`estimate_shared_focal_relative_pose_with_monodepth`):
+  port of `relpose_monodepth_3pt_shared_focal` in centered pixel
+  coordinates; the third camera-2 depth is an unknown found as a real
+  eigenvalue of a 4x4 action matrix (Danilevsky + Sturm here). Models
+  `[R | t | f | f | scale]`.
+- **Varying focal** (`estimate_varying_focal_relative_pose_with_monodepth`):
+  port of `relpose_monodepth_3pt_varying_focal` — a single 3x3 linear
+  system in (1/f1^2, s^2/f2^2, s^2). Models `[R | t | f1 | f2 | scale]`.
+
+All four assemble the pose from the two depth-induced point triplets
+(`Y X^-1` like poselib, with the quaternion SO(3) snap) and share one data
+layout: six columns (x1, y1, x2, y2, d1, d2) plus the two hybrid weights.
+
+- **Scoring** is the plain truncated Sampson error (threshold `max_error`,
+  poselib's `max_errors[1]`); the depth parameters do not enter the score.
+- **Local optimization** (`refiners/monodepth.py`) minimizes the hybrid
+  cost of poselib's `MonoDepth*RelPoseRefiner`s: truncated Sampson
+  (weighted by `weight_sampson`) plus the truncated symmetric reprojection
+  error through the monodepth 3D points, scaled by
+  `scale_reproj = max_error^2 / max_reproj_error^2` so both terms truncate
+  at the same threshold (defaults 2 px Sampson / 16 px reprojection).
+  Analytic jacobians, verified against finite differences in the tests.
+  Tangent parameters: rotation (3), full translation (3, the depths fix the
+  scale), plus additive scale / shifts / focals per problem (7, 9, 8 and 9
+  parameters).
+
+One known gap vs poselib: their python bindings run one extra final bundle
+over the inlier set with a truncated *Cauchy* loss after RANSAC, which on
+a small fraction of scenes escapes shallow local minima that the hard
+truncated loss cannot (zero gradient outside the threshold). On synthetic
+scenes this costs a few hundredths of mAA at a 15-40x runtime advantage
+(see `benchmarks/estimators/monodepth.py`).
+
 ## Install
 
 Install from the repository root:
@@ -247,8 +301,8 @@ fastpose-warmup
 
 The warmup command runs small synthetic estimations for every backend. Use
 `fastpose-warmup --problem fundamental` / `essential` / `absolute` /
-`absolute-focal` / `varying-focal` / `shared-focal` to warm up only one
-backend.
+`absolute-focal` / `varying-focal` / `shared-focal` / `monodepth` to warm
+up only one backend (`monodepth` covers all four monodepth variants).
 
 Run with (from the repository root):
 
@@ -263,6 +317,11 @@ python -m benchmarks.estimators.absolute focal         # P4Pf mAA plot
 python -m benchmarks.estimators.absolute focal-scaling
 python -m benchmarks.estimators.fundamental varying-focal   # varying-focal mAA plot
 python -m benchmarks.estimators.fundamental shared-focal    # shared-focal mAA plot
+
+python -m benchmarks.estimators.monodepth               # calibrated monodepth mAA plot
+python -m benchmarks.estimators.monodepth shared-focal
+python -m benchmarks.estimators.monodepth varying-focal
+python -m benchmarks.estimators.monodepth scaling       # runtime scaling table
 
 python -m benchmarks.solvers.fundamental               # noise-free minimal-sample accuracy
 python -m benchmarks.solvers.essential

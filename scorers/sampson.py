@@ -187,6 +187,52 @@ def shared_focal_pose_sampson_score(model, data, max_error_sq, best_score):
                                             best_score)
 
 
+@njit(cache=True, fastmath=True)
+def monodepth_pose_sampson_score(model, data, max_error_sq, best_score):
+    # scorer for calibrated monodepth models [R | t | scale | shift1 |
+    # shift2]: the truncated Sampson error of E = [t]_x R (the depth
+    # parameters do not enter the scoring, matching poselib's monodepth
+    # estimators which score with the plain Sampson MSAC error)
+    x1_x, x1_y, x2_x, x2_y = data[0], data[1], data[2], data[3]
+    e = np.empty(9)
+    essential_from_pose(model, e)
+    return sampson_score(e, (x1_x, x1_y, x2_x, x2_y), max_error_sq, best_score)
+
+
+class MonoDepthPoseSampsonScorer():
+    # truncated Sampson error for calibrated monodepth models
+    # [R | t | scale | shift1 | shift2]
+    score = staticmethod(monodepth_pose_sampson_score)
+
+    @staticmethod
+    def score_numpy(R, t, x1, x2, max_error):
+        return PoseSampsonScorer.score_numpy(R, t, x1, x2, max_error)
+
+
+@njit(cache=True, fastmath=True)
+def monodepth_focal_pose_sampson_score(model, data, max_error_sq, best_score):
+    # scorer for monodepth focal models [R | t | f1 | f2 | scale] in
+    # centered pixel coordinates: truncated Sampson error of the induced
+    # F = K2^-T E K1^-1 (principal points already subtracted)
+    x1_x, x1_y, x2_x, x2_y = data[0], data[1], data[2], data[3]
+    f = np.empty(9)
+    if not model_to_fundamental(model, 0.0, 0.0, 0.0, 0.0, f):
+        return 1e300, 0
+    return sampson_score(f, (x1_x, x1_y, x2_x, x2_y), max_error_sq, best_score)
+
+
+class MonoDepthFocalPoseSampsonScorer():
+    # truncated Sampson error for monodepth focal models
+    # [R | t | f1 | f2 | scale] in centered pixel coordinates
+    score = staticmethod(monodepth_focal_pose_sampson_score)
+
+    @staticmethod
+    def score_numpy(R, t, f1, f2, x1, x2, max_error):
+        zero = np.zeros(2)
+        return VaryingFocalPoseSampsonScorer.score_numpy(
+            R, t, f1, f2, zero, zero, x1, x2, max_error)
+
+
 class SharedFocalPoseSampsonScorer():
     # truncated Sampson error for pose models [R | t | f | f], evaluated in
     # image coordinates with fixed principal points.
