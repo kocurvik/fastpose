@@ -8,16 +8,16 @@ truncated Sampson (MSAC) scoring.
 
 ## Architecture
 
-The engine (`estimators/ransac.py`) is problem-agnostic LO-RANSAC compiled with
+The engine (`src/fastpose/estimators/ransac.py`) is problem-agnostic LO-RANSAC compiled with
 numba. A camera pose problem plugs in three components, each a thin class wrapping
 a numba kernel with a fixed signature:
 
-- **Solver** (`solvers/`) — minimal solver:
+- **Solver** (`src/fastpose/solvers/`) — minimal solver:
   `solve(data, sample, models, workspace) -> num_models`
   plus metadata (`sample_size`, `num_params`, `max_models`, `workspace_size`).
-- **Scorer** (`scorers/`) — truncated robust score:
+- **Scorer** (`src/fastpose/scorers/`) — truncated robust score:
   `score(model, data, max_error_sq, best_score) -> (score, num_inliers)`.
-- **Refiner** (`refiners/`, optional) — non-minimal refit for local optimization:
+- **Refiner** (`src/fastpose/refiners/`, optional) — non-minimal refit for local optimization:
   `refine(data, model, refined, max_error_sq, num_iterations) -> success`.
 
 `data` is an opaque tuple of contiguous arrays chosen by the problem (for F:
@@ -28,27 +28,28 @@ specialized per problem by `RansacEstimator(solver, scorer, refiner)`.
 ### Layout
 
 ```
-solvers/       minimal solvers: 7-point F, 5-point E, 7-point varying-focal
-               and 6-point shared-focal relative pose, P3P and P4Pf absolute
-               pose, four 3-point monodepth relative pose variants; shared
-               helpers in solvers/utils.py
-scorers/       robust scorers: truncated Sampson (MSAC) for flat 3x3 models,
-               for pose models [R|t] (E = [t]_x R assembled on the fly), for
-               varying/shared-focal pose models [R|t|f1|f2] and for the
-               monodepth model layouts; truncated reprojection error for
-               absolute pose models [R|t] and unknown-focal models [R|t|f]
-refiners/      local optimization; refiners/lm.py is the generic LM engine,
-               refiners/utils.py the shared factorization/jacobian machinery,
-               refiners/{fundamental,essential,varying_focal,shared_focal,
-               absolute,absolute_focal,monodepth}.py the per-problem kernels
-estimators/    the RANSAC engine (estimators/ransac.py) and the full pipelines
-               estimate_fundamental / estimate_relative_pose /
-               estimate_relative_pose_with_varying_focals /
-               estimate_relative_pose_with_shared_focal /
-               estimate_absolute_pose / estimate_absolute_pose_with_focal /
-               estimate_relative_pose_with_monodepth /
-               estimate_{shared,varying}_focal_relative_pose_with_monodepth;
-               shared helpers in estimators/utils.py
+src/fastpose/
+    solvers/       minimal solvers: 7-point F, 5-point E, 7-point varying-focal
+                   and 6-point shared-focal relative pose, P3P and P4Pf absolute
+                   pose, four 3-point monodepth relative pose variants; shared
+                   helpers in solvers/utils.py
+    scorers/       robust scorers: truncated Sampson (MSAC) for flat 3x3 models,
+                   for pose models [R|t] (E = [t]_x R assembled on the fly), for
+                   varying/shared-focal pose models [R|t|f1|f2] and for the
+                   monodepth model layouts; truncated reprojection error for
+                   absolute pose models [R|t] and unknown-focal models [R|t|f]
+    refiners/      local optimization; refiners/lm.py is the generic LM engine,
+                   refiners/utils.py the shared factorization/jacobian machinery,
+                   refiners/{fundamental,essential,varying_focal,shared_focal,
+                   absolute,absolute_focal,monodepth}.py the per-problem kernels
+    estimators/    the RANSAC engine (estimators/ransac.py) and the full pipelines
+                   estimate_fundamental / estimate_relative_pose /
+                   estimate_relative_pose_with_varying_focals /
+                   estimate_relative_pose_with_shared_focal /
+                   estimate_absolute_pose / estimate_absolute_pose_with_focal /
+                   estimate_relative_pose_with_monodepth /
+                   estimate_{shared,varying}_focal_relative_pose_with_monodepth;
+                   shared helpers in estimators/utils.py
 benchmarks/    benchmarks/estimators compares against poselib (mAA + runtime
                scaling); benchmarks/solvers evaluates solver accuracy on
                synthetic noise-free minimal samples; shared metrics, data
@@ -57,19 +58,23 @@ tests/         finite-difference checks of the refiner jacobians (tests/jac)
                and end-to-end estimator tests on synthetic scenes
 ```
 
+All four subpackages are only reachable through `fastpose` (e.g.
+`from fastpose.solvers import p3p` or `from fastpose import estimators`) —
+`import solvers` / `import estimators` etc. directly is not supported.
+
 Adding a new problem (P3P, ...) means writing the three kernels and their wrapper —
 the RANSAC loop is reused unchanged. The 5-point problem demonstrates the reuse:
 it shares the Sampson scorer verbatim and only adds a solver and a refiner.
 
 ### Shared LM refiner engine
 
-`refiners/lm.py` contains the Levenberg-Marquardt loop itself (damping schedule,
+`src/fastpose/refiners/lm.py` contains the Levenberg-Marquardt loop itself (damping schedule,
 damped normal equations, accept/reject, convergence) once, compiled per problem
 via closure specialization like the RANSAC driver. A refinement problem only
 defines four small kernels over a flat state vector: `init_state` (model →
 state), `state_to_model` (state → model), `accumulate` (residuals + jacobian →
 normal equations) and `apply_step` (retraction). Both epipolar refiners share
-the Sampson jacobian accumulation from `refiners/utils.py`; the fundamental
+the Sampson jacobian accumulation from `src/fastpose/refiners/utils.py`; the fundamental
 refiner optimizes the factorized state `F = U diag(1, sigma, 0) V^T` (7 tangent
 parameters), the essential refiner optimizes the pose `[R | t]` directly
 (5 tangent parameters: rotation + translation direction on the unit sphere).
@@ -113,7 +118,7 @@ same seeds): plain RANSAC 638–1165 inliers, LO-RANSAC 896–1183, poselib
 
 ## 5-point relative pose backend
 
-`solvers/essential.py` + `refiners/essential.py` add calibrated relative pose
+`src/fastpose/solvers/essential.py` + `src/fastpose/refiners/essential.py` add calibrated relative pose
 estimation on the same engine:
 
 - **Stewénius-style 5-point solver**: 4-dimensional nullspace by Gaussian
@@ -134,7 +139,7 @@ estimation on the same engine:
   gauge-free parametrization of the essential manifold — 3 for the rotation
   update `R exp([w]_x)` and 2 for the translation direction in an orthonormal
   basis of the plane orthogonal to t, retracted back to the unit sphere. Reuses
-  the shared LM engine and Sampson jacobian accumulation from `refiners/`.
+  the shared LM engine and Sampson jacobian accumulation from `src/fastpose/refiners/`.
 - `motion_from_essential` is kept for decomposing externally estimated E/F
   matrices (used by the fundamental matrix benchmark).
 
@@ -159,14 +164,14 @@ since poselib additionally applies cheirality filtering during scoring.)
 unknown focal lengths from pixel correspondences with known principal points,
 on the same engine:
 
-- **Minimal solver** (`solvers/varying_focal.py`): standard 7-point fundamental
+- **Minimal solver** (`src/fastpose/solvers/varying_focal.py`): standard 7-point fundamental
   matrix hypotheses, focal lengths from the Bougnoux formula (square pixels,
   known principal points), then E = K2^T F K1 decomposed with the shared
   closed-form essential decomposition and cheirality check into pose models
   `[R | t | f1 | f2]` (14 flat parameters).
 - **Scorer**: the truncated Sampson error of the induced fundamental matrix
   F = K2^-T E K1^-1, evaluated in the original pixel coordinates.
-- **LM refiner** (`refiners/varying_focal.py`): 7 tangent parameters — rotation
+- **LM refiner** (`src/fastpose/refiners/varying_focal.py`): 7 tangent parameters — rotation
   (3), translation direction (2) and the two log-focals — with the Sampson
   jacobian built from a central-difference tangent basis of the induced F.
 - Hypotheses whose Bougnoux focal estimates are non-positive are rejected
@@ -177,17 +182,17 @@ on the same engine:
 `estimate_absolute_pose` estimates the pose `[R | t]` (with
 `lambda * (x, y, 1) = R X + t`) from calibrated 2D-3D correspondences:
 
-- **P3P solver of Ding et al.** (`solvers/p3p.py`, "Revisiting the P3P
+- **P3P solver of Ding et al.** (`src/fastpose/solvers/p3p.py`, "Revisiting the P3P
   Problem", CVPR 2023), ported from poselib's `p3p.cc`: the three
   correspondences reduce to a single cubic; the rank-2 conic pencil splits
   into two lines, each giving a quadratic in a depth ratio, and the depths
   are polished with a few Newton steps before the pose is assembled — no
   eigendecomposition anywhere.
-- **Truncated reprojection scorer** (`scorers/reprojection.py`): fused MSAC
+- **Truncated reprojection scorer** (`src/fastpose/scorers/reprojection.py`): fused MSAC
   scoring with the same exact per-chunk early bail-out as the Sampson
   scorers; the inlier test is division-free and points behind the camera
   count as outliers.
-- **LM refiner on the pose directly** (`refiners/absolute.py`): 6 tangent
+- **LM refiner on the pose directly** (`src/fastpose/refiners/absolute.py`): 6 tangent
   parameters (rotation update `R exp([w]_x)` + translation) with an analytic
   reprojection jacobian, on the shared LM engine.
 
@@ -196,7 +201,7 @@ on the same engine:
 `estimate_absolute_pose_with_focal` estimates `[R | t | f]` from 2D-3D
 correspondences in pixel coordinates (square pixels, known principal point):
 
-- **P4Pf solver** (`solvers/p4pf.py`), a port of poselib's `p4pf.cc` +
+- **P4Pf solver** (`src/fastpose/solvers/p4pf.py`), a port of poselib's `p4pf.cc` +
   `re3q3.cc`: the first two camera rows are parametrized by the 4-dimensional
   nullspace of the eight cross-product constraints — computed by Gaussian
   elimination + modified Gram-Schmidt like the 5-point nullspace (no LAPACK
@@ -206,10 +211,10 @@ correspondences in pixel coordinates (square pixels, known principal point):
   on the sample, the solution closest to square pixels is kept, and R is
   snapped back onto SO(3) via a quaternion round-trip (as poselib does by
   storing poses as quaternions).
-- **Truncated focal reprojection scorer** (`scorers/reprojection.py`): the
+- **Truncated focal reprojection scorer** (`src/fastpose/scorers/reprojection.py`): the
   `[R | t]` scorer with the focal folded into the projection, same
   division-free inlier test and per-chunk early bail-out.
-- **LM refiner** (`refiners/absolute_focal.py`): 7 tangent parameters
+- **LM refiner** (`src/fastpose/refiners/absolute_focal.py`): 7 tangent parameters
   (rotation, translation, log-focal) with an analytic jacobian.
 
 ## Shared-focal relative pose backend
@@ -218,7 +223,7 @@ correspondences in pixel coordinates (square pixels, known principal point):
 focal length shared by both cameras from pixel correspondences with known
 principal points:
 
-- **6-point minimal solver** (`solvers/shared_focal.py`), a port of
+- **6-point minimal solver** (`src/fastpose/solvers/shared_focal.py`), a port of
   poselib's `relpose_6pt_focal.cc`: 3-dimensional nullspace by Gaussian
   elimination + Gram-Schmidt, mixed by a fixed rotation because the
   pregenerated elimination template is only valid for a generic nullspace
@@ -229,7 +234,7 @@ principal points:
   closed-form essential decomposition and cheirality check into pose models
   `[R | t | f | f]` (14 flat parameters, varying-focal layout).
 - **Scorer**: the varying-focal truncated Sampson scorer reused verbatim.
-- **LM refiner** (`refiners/shared_focal.py`): 6 tangent parameters —
+- **LM refiner** (`src/fastpose/refiners/shared_focal.py`): 6 tangent parameters —
   rotation (3), translation direction (2) and one shared log-focal — with
   the Sampson jacobian built like the varying-focal refiner.
 
@@ -240,7 +245,7 @@ estimates (scale- or affine-invariant MDE outputs), following poselib's
 monodepth estimators. The depth convention is poselib's
 `MonoDepthTwoViewGeometry`: the 3D point of correspondence i is
 `(d1_i + shift1) x1h_i` in camera 1 and `scale (d2_i + shift2) x2h_i` in
-camera 2. Four 3-point minimal solvers (`solvers/monodepth.py`):
+camera 2. Four 3-point minimal solvers (`src/fastpose/solvers/monodepth.py`):
 
 - **Calibrated without shift** (`estimate_relative_pose_with_monodepth`,
   scale-invariant depths): 3D points from the camera-1 depths, absolute
@@ -266,7 +271,7 @@ layout: six columns (x1, y1, x2, y2, d1, d2) plus the two hybrid weights.
 
 - **Scoring** is the plain truncated Sampson error (threshold `max_error`,
   poselib's `max_errors[1]`); the depth parameters do not enter the score.
-- **Local optimization** (`refiners/monodepth.py`) minimizes the hybrid
+- **Local optimization** (`src/fastpose/refiners/monodepth.py`) minimizes the hybrid
   cost of poselib's `MonoDepth*RelPoseRefiner`s: truncated Sampson
   (weighted by `weight_sampson`) plus the truncated symmetric reprojection
   error through the monodepth 3D points, scaled by
@@ -303,6 +308,43 @@ The warmup command runs small synthetic estimations for every backend. Use
 `fastpose-warmup --problem fundamental` / `essential` / `absolute` /
 `absolute-focal` / `varying-focal` / `shared-focal` / `monodepth` to warm
 up only one backend (`monodepth` covers all four monodepth variants).
+
+## Usage
+
+Everything is reachable from the top-level `fastpose` package:
+
+```python
+import numpy as np
+from fastpose.estimators import estimate_relative_pose, estimate_fundamental, estimate_absolute_pose
+
+# calibrated relative pose (5-point): x1, x2 are normalized (x - c) / f
+R, t, num_inliers, inliers = estimate_relative_pose(
+    x1, x2, iterations=1000, max_error=2.0 / focal, lo_iterations=None)
+
+# fundamental matrix (7-point): x1, x2 are pixel coordinates
+F, num_inliers, inliers = estimate_fundamental(
+    x1, x2, iterations=1000, max_error=2.0)
+
+# absolute pose (P3P): x is normalized image points, X the 3D points
+R, t, num_inliers, inliers = estimate_absolute_pose(
+    x, X, iterations=1000, max_error=2.0 / focal)
+```
+
+Every `estimate_*` function follows the same pattern: it takes the
+correspondence arrays plus RANSAC options (`iterations`, `max_error`,
+`min_iterations` for adaptive termination, `lo_iterations` for the local
+optimization budget, `seed`) and returns the best model, inlier count and
+inlier mask. See the per-backend sections above for the full list
+(`estimate_relative_pose_with_varying_focals`,
+`estimate_relative_pose_with_shared_focal`,
+`estimate_absolute_pose_with_focal`,
+`estimate_relative_pose_with_monodepth`,
+`estimate_{shared,varying}_focal_relative_pose_with_monodepth`) and the
+`# params:` comment at the top of each function in
+`src/fastpose/estimators/` for exact argument units (several take
+normalized/calibrated points rather than pixels).
+
+## Running benchmarks and tests
 
 Run with (from the repository root):
 
