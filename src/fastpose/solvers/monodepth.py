@@ -38,10 +38,10 @@ import math
 import numpy as np
 from numba import njit
 
-from solvers.essential import _real_roots_sturm
-from solvers.p3p import _p3p_impl
-from solvers.p4pf import _project_rotation, _solve_3xn_neg
-from solvers.shared_focal import _charpoly_danilevsky_n
+from fastpose.solvers.essential import _real_roots_sturm
+from fastpose.solvers.p3p import _p3p_impl
+from fastpose.solvers.p4pf import _project_rotation, _solve_3xn_neg
+from fastpose.solvers.shared_focal import _charpoly_danilevsky_n
 
 MODEL_SIZE = 15
 

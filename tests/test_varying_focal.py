@@ -2,8 +2,8 @@ import numpy as np
 
 from benchmarks.utils import (generate_relpose_data, rotation_error_deg, skew,
                               translation_error_deg)
-from estimators.varying_focal import estimate_relative_pose_with_varying_focals
-from solvers.varying_focal import bougnoux_focals_sq
+from fastpose.estimators.varying_focal import estimate_relative_pose_with_varying_focals
+from fastpose.solvers.varying_focal import bougnoux_focals_sq
 
 
 def make_varying_focal_scene(seed, num_samples=100, noise_sigma=0.0,

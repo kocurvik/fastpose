@@ -1,25 +1,32 @@
-"""Relative pose refiner with one focal length shared by both cameras."""
+"""Relative pose refiner with two unknown focal lengths.
+
+The model is `[R | t | f1 | f2]`. LM optimizes a 7-dimensional tangent:
+3 rotation parameters, 2 translation-direction parameters and 2 log-focal
+parameters. The Sampson residual Jacobian is built from a numerical tangent
+basis of the induced fundamental matrix.
+"""
 
 import math
 
 import numpy as np
 from numba import njit
 
-from refiners.essential import _tangent_basis
-from refiners.lm import build_lm_refine
-from refiners.utils import accumulate_sampson_normal_eqs, mat3_mul, rodrigues
-from scorers.sampson import model_to_fundamental, shared_focal_pose_sampson_score
-from solvers.shared_focal import MODEL_SIZE
+from fastpose.refiners.essential import _tangent_basis
+from fastpose.refiners.lm import build_lm_refine
+from fastpose.refiners.utils import accumulate_sampson_normal_eqs, mat3_mul, rodrigues
+from fastpose.scorers.sampson import (model_to_fundamental,
+                             varying_focal_pose_sampson_score)
+from fastpose.solvers.varying_focal import MODEL_SIZE
 
-STATE_SIZE = 13
-NUM_TANGENT = 6  # 3 rotation + 2 translation-direction + 1 log-focal
+STATE_SIZE = 14
+NUM_TANGENT = 7
 
 
 @njit(cache=True)
 def _init_state(model, state):
     norm_t = math.sqrt(model[9] * model[9] + model[10] * model[10]
                        + model[11] * model[11])
-    if norm_t < 1e-12 or model[12] <= 0.0:
+    if norm_t < 1e-12 or model[12] <= 0.0 or model[13] <= 0.0:
         return False
     inv = 1.0 / norm_t
     for j in range(9):
@@ -28,6 +35,7 @@ def _init_state(model, state):
     state[10] = model[10] * inv
     state[11] = model[11] * inv
     state[12] = math.log(model[12])
+    state[13] = math.log(model[13])
     return True
 
 
@@ -35,9 +43,8 @@ def _init_state(model, state):
 def _state_to_model(state, model):
     for j in range(12):
         model[j] = state[j]
-    f = math.exp(state[12])
-    model[12] = f
-    model[13] = f
+    model[12] = math.exp(state[12])
+    model[13] = math.exp(state[13])
 
 
 @njit(cache=True)
@@ -60,6 +67,7 @@ def _apply_step(state, delta, state_new):
     state_new[10] = t1 * inv
     state_new[11] = t2 * inv
     state_new[12] = state[12] + delta[5]
+    state_new[13] = state[13] + delta[6]
 
 
 @njit(cache=True)
@@ -100,13 +108,13 @@ def _accumulate(data, f, state, JtJ, Jtr, max_error_sq):
         (x1_x, x1_y, x2_x, x2_y), base_f, B, JtJ, Jtr, max_error_sq)
 
 
-_refine_shared_focal_lm = build_lm_refine(
+_refine_varying_focal_lm = build_lm_refine(
     _init_state, _state_to_model, _accumulate, _apply_step,
-    shared_focal_pose_sampson_score, STATE_SIZE, NUM_TANGENT, MODEL_SIZE)
+    varying_focal_pose_sampson_score, STATE_SIZE, NUM_TANGENT, MODEL_SIZE)
 
 
-class LMSharedFocalPoseRefiner():
+class LMVaryingFocalPoseRefiner():
     def __init__(self, num_iterations=15):
         self.num_iterations = num_iterations
 
-    refine = staticmethod(_refine_shared_focal_lm)
+    refine = staticmethod(_refine_varying_focal_lm)

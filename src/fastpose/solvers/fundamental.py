@@ -13,7 +13,7 @@ import math
 import numpy as np
 from numba import njit
 
-from solvers.utils import fill_epipolar_matrix
+from fastpose.solvers.utils import fill_epipolar_matrix
 
 
 # ---------------------------------------------------------------------------

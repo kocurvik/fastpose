@@ -2,9 +2,9 @@ import numpy as np
 
 from benchmarks.utils import (generate_relpose_data, rotation_error_deg,
                               translation_error_deg)
-from estimators.shared_focal import estimate_relative_pose_with_shared_focal
-from estimators.utils import normalize_points
-from solvers.shared_focal import SixPointSharedFocalSolver, _solve_shared_focal_6pt
+from fastpose.estimators.shared_focal import estimate_relative_pose_with_shared_focal
+from fastpose.estimators.utils import normalize_points
+from fastpose.solvers.shared_focal import SixPointSharedFocalSolver, _solve_shared_focal_6pt
 
 FOCAL = 1000.0
 PP1 = np.array([500.0, 480.0])

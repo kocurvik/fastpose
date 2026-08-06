@@ -9,11 +9,11 @@ defined here — the LM loop itself lives in refiners/lm.py.
 import numpy as np
 from numba import njit
 
-from refiners.lm import build_lm_refine
-from refiners.utils import (STATE_SIZE, accumulate_sampson_normal_eqs,
+from fastpose.refiners.lm import build_lm_refine
+from fastpose.refiners.utils import (STATE_SIZE, accumulate_sampson_normal_eqs,
                             apply_rotation_step, epipolar_jacobian_basis,
                             state_to_model, svd_init_state)
-from scorers.sampson import sampson_score
+from fastpose.scorers.sampson import sampson_score
 
 NUM_TANGENT = 7  # 3 left rotation + 3 right rotation + sigma
 

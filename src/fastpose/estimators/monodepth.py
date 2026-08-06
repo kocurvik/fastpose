@@ -25,14 +25,14 @@ error, whose threshold `max_reproj_error` sets the relative weighting
 
 import numpy as np
 
-from estimators.ransac import RansacEstimator
-from refiners.monodepth import (LMMonoDepthPoseRefiner,
+from fastpose.estimators.ransac import RansacEstimator
+from fastpose.refiners.monodepth import (LMMonoDepthPoseRefiner,
                                 LMMonoDepthSharedFocalPoseRefiner,
                                 LMMonoDepthShiftPoseRefiner,
                                 LMMonoDepthVaryingFocalPoseRefiner)
-from scorers.sampson import (MonoDepthFocalPoseSampsonScorer,
+from fastpose.scorers.sampson import (MonoDepthFocalPoseSampsonScorer,
                              MonoDepthPoseSampsonScorer)
-from solvers.monodepth import (MonoDepthP3PSolver, MonoDepthSharedFocalSolver,
+from fastpose.solvers.monodepth import (MonoDepthP3PSolver, MonoDepthSharedFocalSolver,
                                MonoDepthShiftSolver,
                                MonoDepthVaryingFocalSolver)
 

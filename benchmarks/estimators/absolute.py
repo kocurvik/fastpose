@@ -22,8 +22,8 @@ import numpy as np
 
 from benchmarks.utils import (generate_abspose_data, pose_maa,
                               plot_maa_tradeoff, rotation_error_deg)
-from estimators.absolute import estimate_absolute_pose
-from estimators.absolute_focal import estimate_absolute_pose_with_focal
+from fastpose.estimators.absolute import estimate_absolute_pose
+from fastpose.estimators.absolute_focal import estimate_absolute_pose_with_focal
 
 MEAN_SCENE_DEPTH = 7.0  # depths are drawn uniformly from [4, 10]
 

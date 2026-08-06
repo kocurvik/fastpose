@@ -2,11 +2,11 @@
 
 import numpy as np
 
-from estimators.ransac import RansacEstimator
-from estimators.utils import normalize_points
-from refiners.varying_focal import LMVaryingFocalPoseRefiner
-from scorers.sampson import VaryingFocalPoseSampsonScorer
-from solvers.varying_focal import SevenPointVaryingFocalSolver
+from fastpose.estimators.ransac import RansacEstimator
+from fastpose.estimators.utils import normalize_points
+from fastpose.refiners.varying_focal import LMVaryingFocalPoseRefiner
+from fastpose.scorers.sampson import VaryingFocalPoseSampsonScorer
+from fastpose.solvers.varying_focal import SevenPointVaryingFocalSolver
 
 _default_estimator = None
 

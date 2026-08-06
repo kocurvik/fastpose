@@ -15,9 +15,9 @@ import math
 import numpy as np
 from numba import njit
 
-from refiners.lm import build_lm_refine
-from refiners.utils import accumulate_sampson_normal_eqs, mat3_mul, rodrigues
-from scorers.sampson import essential_from_pose, pose_sampson_score
+from fastpose.refiners.lm import build_lm_refine
+from fastpose.refiners.utils import accumulate_sampson_normal_eqs, mat3_mul, rodrigues
+from fastpose.scorers.sampson import essential_from_pose, pose_sampson_score
 
 STATE_SIZE = 12
 MODEL_SIZE = 12

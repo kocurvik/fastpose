@@ -8,11 +8,11 @@ benchmark).
 
 import numpy as np
 
-from estimators.ransac import RansacEstimator
-from estimators.utils import point_columns
-from refiners.essential import LMEssentialRefiner
-from scorers.sampson import PoseSampsonScorer
-from solvers.essential import FivePointSolver
+from fastpose.estimators.ransac import RansacEstimator
+from fastpose.estimators.utils import point_columns
+from fastpose.refiners.essential import LMEssentialRefiner
+from fastpose.scorers.sampson import PoseSampsonScorer
+from fastpose.solvers.essential import FivePointSolver
 
 _default_estimator = None
 

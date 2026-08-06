@@ -1,8 +1,8 @@
 import numpy as np
 
 from benchmarks.utils import generate_abspose_data, rotation_error_deg
-from estimators.absolute_focal import estimate_absolute_pose_with_focal
-from solvers.p4pf import P4PFSolver, _solve_p4pf
+from fastpose.estimators.absolute_focal import estimate_absolute_pose_with_focal
+from fastpose.solvers.p4pf import P4PFSolver, _solve_p4pf
 
 FOCAL = 1200.0
 IMAGE_SIZE = 2000.0

@@ -3,12 +3,12 @@ import pytest
 
 from benchmarks.utils import (generate_monodepth_relpose_data,
                               rotation_error_deg)
-from estimators.monodepth import (
+from fastpose.estimators.monodepth import (
     estimate_relative_pose_with_monodepth,
     estimate_shared_focal_relative_pose_with_monodepth,
     estimate_varying_focal_relative_pose_with_monodepth)
-from refiners import monodepth as md_refiners
-from solvers import monodepth as md_solvers
+from fastpose.refiners import monodepth as md_refiners
+from fastpose.solvers import monodepth as md_solvers
 
 FOCAL = 1000.0
 FOCAL1 = 800.0

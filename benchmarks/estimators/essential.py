@@ -14,7 +14,7 @@ import numpy as np
 from benchmarks.utils import (generate_relpose_data, pose_maa,
                               plot_maa_tradeoff, rotation_error_deg,
                               translation_error_deg)
-from estimators.essential import estimate_relative_pose
+from fastpose.estimators.essential import estimate_relative_pose
 
 
 def _pose_error(R_est, t_est, R_gt, t_gt):

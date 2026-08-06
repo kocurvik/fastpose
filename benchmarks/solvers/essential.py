@@ -27,8 +27,8 @@ import numpy as np
 
 from benchmarks.utils import (max_algebraic_residual, report_runtime,
                               report_solver_accuracy, rotation_error_deg, skew)
-from estimators.utils import point_columns
-from solvers.essential import FivePointSolver
+from fastpose.estimators.utils import point_columns
+from fastpose.solvers.essential import FivePointSolver
 
 
 def _signed_translation_error_deg(t_est, t_gt):

@@ -6,11 +6,11 @@ for benchmarking.
 
 import numpy as np
 
-from estimators.ransac import RansacEstimator
-from estimators.utils import normalize_points, point_columns
-from refiners.fundamental import LMFundamentalRefiner
-from scorers.sampson import SampsonScorer
-from solvers.fundamental import SevenPointSolver, seven_point
+from fastpose.estimators.ransac import RansacEstimator
+from fastpose.estimators.utils import normalize_points, point_columns
+from fastpose.refiners.fundamental import LMFundamentalRefiner
+from fastpose.scorers.sampson import SampsonScorer
+from fastpose.solvers.fundamental import SevenPointSolver, seven_point
 
 
 def estimate_fundamental_numpy(x1, x2, iterations=1000, max_error=2.0):

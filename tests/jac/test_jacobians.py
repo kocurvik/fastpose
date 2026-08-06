@@ -15,8 +15,8 @@ residuals go through E = [t]_x R.
 import numpy as np
 import pytest
 
-from refiners import essential, fundamental
-from refiners import utils as refiner_utils
+from fastpose.refiners import essential, fundamental
+from fastpose.refiners import utils as refiner_utils
 
 
 def _skew(t):

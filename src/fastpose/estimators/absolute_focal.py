@@ -4,10 +4,10 @@ direct pose + log-focal LM refiner."""
 
 import numpy as np
 
-from estimators.ransac import RansacEstimator
-from refiners.absolute_focal import LMAbsolutePoseFocalRefiner
-from scorers.reprojection import FocalReprojectionScorer
-from solvers.p4pf import P4PFSolver
+from fastpose.estimators.ransac import RansacEstimator
+from fastpose.refiners.absolute_focal import LMAbsolutePoseFocalRefiner
+from fastpose.scorers.reprojection import FocalReprojectionScorer
+from fastpose.solvers.p4pf import P4PFSolver
 
 _default_estimator = None
 

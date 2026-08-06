@@ -2,11 +2,11 @@
 
 import numpy as np
 
-from estimators.ransac import RansacEstimator
-from estimators.utils import normalize_points
-from refiners.shared_focal import LMSharedFocalPoseRefiner
-from scorers.sampson import SharedFocalPoseSampsonScorer
-from solvers.shared_focal import SixPointSharedFocalSolver
+from fastpose.estimators.ransac import RansacEstimator
+from fastpose.estimators.utils import normalize_points
+from fastpose.refiners.shared_focal import LMSharedFocalPoseRefiner
+from fastpose.scorers.sampson import SharedFocalPoseSampsonScorer
+from fastpose.solvers.shared_focal import SixPointSharedFocalSolver
 
 _default_estimator = None
 

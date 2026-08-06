@@ -11,8 +11,8 @@ import math
 import numpy as np
 from numba import njit
 
-from solvers.essential import _pose_from_essential
-from solvers.fundamental import _det3_flat, _nullspace_7pt, _solve_cubic_real
+from fastpose.solvers.essential import _pose_from_essential
+from fastpose.solvers.fundamental import _det3_flat, _nullspace_7pt, _solve_cubic_real
 
 MODEL_SIZE = 14
 

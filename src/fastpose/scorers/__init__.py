@@ -1,7 +1,7 @@
-from scorers.reprojection import (FocalReprojectionScorer, ReprojectionScorer,
+from fastpose.scorers.reprojection import (FocalReprojectionScorer, ReprojectionScorer,
                                   focal_reprojection_score,
                                   reprojection_score)
-from scorers.sampson import (MonoDepthFocalPoseSampsonScorer,
+from fastpose.scorers.sampson import (MonoDepthFocalPoseSampsonScorer,
                              MonoDepthPoseSampsonScorer, PoseSampsonScorer,
                              SampsonScorer, SharedFocalPoseSampsonScorer,
                              VaryingFocalPoseSampsonScorer,

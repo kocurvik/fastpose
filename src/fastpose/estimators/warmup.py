@@ -5,16 +5,16 @@ import time
 
 import numpy as np
 
-from estimators.absolute import estimate_absolute_pose
-from estimators.absolute_focal import estimate_absolute_pose_with_focal
-from estimators.essential import estimate_relative_pose
-from estimators.fundamental import estimate_fundamental
-from estimators.monodepth import (
+from fastpose.estimators.absolute import estimate_absolute_pose
+from fastpose.estimators.absolute_focal import estimate_absolute_pose_with_focal
+from fastpose.estimators.essential import estimate_relative_pose
+from fastpose.estimators.fundamental import estimate_fundamental
+from fastpose.estimators.monodepth import (
     estimate_relative_pose_with_monodepth,
     estimate_shared_focal_relative_pose_with_monodepth,
     estimate_varying_focal_relative_pose_with_monodepth)
-from estimators.shared_focal import estimate_relative_pose_with_shared_focal
-from estimators.varying_focal import estimate_relative_pose_with_varying_focals
+from fastpose.estimators.shared_focal import estimate_relative_pose_with_shared_focal
+from fastpose.estimators.varying_focal import estimate_relative_pose_with_varying_focals
 
 
 def _synthetic_correspondences(num_points=32):

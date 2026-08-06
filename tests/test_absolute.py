@@ -1,8 +1,8 @@
 import numpy as np
 
 from benchmarks.utils import generate_abspose_data, rotation_error_deg
-from estimators.absolute import estimate_absolute_pose
-from solvers.p3p import P3PSolver, _solve_p3p
+from fastpose.estimators.absolute import estimate_absolute_pose
+from fastpose.solvers.p3p import P3PSolver, _solve_p3p
 
 
 def make_abspose_scene(seed, num_samples=100, noise_sigma=0.0,

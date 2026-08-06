@@ -29,9 +29,9 @@ import math
 import numpy as np
 from numba import njit
 
-from refiners.lm import build_lm_refine
-from refiners.utils import mat3_mul, rodrigues
-from scorers.sampson import essential_from_pose
+from fastpose.refiners.lm import build_lm_refine
+from fastpose.refiners.utils import mat3_mul, rodrigues
+from fastpose.scorers.sampson import essential_from_pose
 
 STATE_SIZE = 15
 MODEL_SIZE = 15

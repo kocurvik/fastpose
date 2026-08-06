@@ -28,7 +28,7 @@ import math
 import numpy as np
 from numba import njit
 
-from solvers.essential import _real_roots_sturm
+from fastpose.solvers.essential import _real_roots_sturm
 
 MODEL_SIZE = 13
 

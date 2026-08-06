@@ -26,7 +26,8 @@ classifiers = [
 ]
 
 [project.scripts]
-fastpose-warmup = "estimators.warmup:main"
+fastpose-warmup = "fastpose.estimators.warmup:main"
 
 [tool.setuptools]
-packages = ["estimators", "refiners", "scorers", "solvers"]
+package-dir = { "" = "src" }
+packages = ["fastpose", "fastpose.estimators", "fastpose.refiners", "fastpose.scorers", "fastpose.solvers"]

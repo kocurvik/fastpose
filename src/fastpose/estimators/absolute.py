@@ -3,10 +3,10 @@ al.), truncated reprojection scorer and direct pose LM refiner."""
 
 import numpy as np
 
-from estimators.ransac import RansacEstimator
-from refiners.absolute import LMAbsolutePoseRefiner
-from scorers.reprojection import ReprojectionScorer
-from solvers.p3p import P3PSolver
+from fastpose.estimators.ransac import RansacEstimator
+from fastpose.refiners.absolute import LMAbsolutePoseRefiner
+from fastpose.scorers.reprojection import ReprojectionScorer
+from fastpose.solvers.p3p import P3PSolver
 
 _default_estimator = None
 

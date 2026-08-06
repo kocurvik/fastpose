@@ -18,8 +18,8 @@ import numpy as np
 from benchmarks.utils import (best_model_error, generate_exact_fundamental_sample,
                               max_algebraic_residual, report_runtime,
                               report_solver_accuracy)
-from estimators.utils import point_columns
-from solvers.fundamental import SevenPointSolver
+from fastpose.estimators.utils import point_columns
+from fastpose.solvers.fundamental import SevenPointSolver
 
 
 def run(num_trials=1000, seed=0, repeats=5):

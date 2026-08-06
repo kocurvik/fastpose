@@ -9,9 +9,9 @@ import numpy as np
 
 from benchmarks.utils import (generate_relpose_data, rotation_error_deg, skew,
                               translation_error_deg)
-from refiners.essential import LMEssentialRefiner
-from refiners.fundamental import LMFundamentalRefiner
-from scorers.sampson import PoseSampsonScorer, SampsonScorer
+from fastpose.refiners.essential import LMEssentialRefiner
+from fastpose.refiners.fundamental import LMFundamentalRefiner
+from fastpose.scorers.sampson import PoseSampsonScorer, SampsonScorer
 
 FOCAL = 1000.0
 IMAGE_SIZE = 2000.0

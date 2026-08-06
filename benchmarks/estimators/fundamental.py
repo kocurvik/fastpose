@@ -18,11 +18,11 @@ from benchmarks.utils import (generate_data, generate_relpose_data, pose_maa,
                               generate_varying_focal_relpose_data,
                               plot_maa_tradeoff, rotation_error_deg,
                               translation_error_deg)
-from estimators.essential import motion_from_essential
-from estimators.fundamental import estimate_fundamental
-from estimators.shared_focal import estimate_relative_pose_with_shared_focal
-from estimators.varying_focal import estimate_relative_pose_with_varying_focals
-from scorers.sampson import SampsonScorer
+from fastpose.estimators.essential import motion_from_essential
+from fastpose.estimators.fundamental import estimate_fundamental
+from fastpose.estimators.shared_focal import estimate_relative_pose_with_shared_focal
+from fastpose.estimators.varying_focal import estimate_relative_pose_with_varying_focals
+from fastpose.scorers.sampson import SampsonScorer
 
 
 def _pose_error_from_f(F, inliers, x1n, x2n, K, R_gt, t_gt):

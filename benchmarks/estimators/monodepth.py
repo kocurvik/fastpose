@@ -24,7 +24,7 @@ import numpy as np
 from benchmarks.utils import (generate_monodepth_relpose_data, pose_maa,
                               plot_maa_tradeoff, rotation_error_deg,
                               translation_error_deg)
-from estimators.monodepth import (
+from fastpose.estimators.monodepth import (
     estimate_relative_pose_with_monodepth,
     estimate_shared_focal_relative_pose_with_monodepth,
     estimate_varying_focal_relative_pose_with_monodepth)
