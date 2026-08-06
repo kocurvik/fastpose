@@ -23,7 +23,7 @@ def _get_default_estimator():
 
 def estimate_absolute_pose_with_focal(x, X, principal_point=None,
                                       iterations=1000, max_error=2.0,
-                                      seed=None, min_iterations=None,
+                                      seed=4578, min_iterations=None,
                                       success_prob=0.9999, lo_iterations=None):
     # params:
     # x - (n, 2) array of image points in pixel coordinates (square pixels,

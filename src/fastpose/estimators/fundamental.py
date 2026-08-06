@@ -13,14 +13,15 @@ from fastpose.scorers.sampson import SampsonScorer
 from fastpose.solvers.fundamental import SevenPointSolver, seven_point
 
 
-def estimate_fundamental_numpy(x1, x2, iterations=1000, max_error=2.0):
+def estimate_fundamental_numpy(x1, x2, iterations=1000, max_error=2.0, seed=4578):
     # pure-numpy reference RANSAC (no local optimization)
     x1n, x2n, T, scale = normalize_points(x1, x2)
     threshold = max_error * scale
     best_score = np.inf
     best_model = None
+    rng = np.random.default_rng(seed)
     for _ in range(iterations):
-        idxs = np.random.choice(len(x1n), 7, replace=False)
+        idxs = rng.choice(len(x1n), 7, replace=False)
         Fs = seven_point(x1n[idxs], x2n[idxs])
         for F in Fs:
             score, inliers, num_inliers = SampsonScorer.score_numpy(F, x1n, x2n, threshold)
@@ -48,7 +49,7 @@ def _get_default_estimator():
     return _default_estimator
 
 
-def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=None,
+def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
                          min_iterations=None, success_prob=0.9999,
                          lo_iterations=None):
     # params:

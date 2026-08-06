@@ -26,7 +26,7 @@ def _get_default_estimator():
 
 
 def estimate_relative_pose(x1, x2, iterations=1000, max_error=0.002,
-                           seed=None, min_iterations=None,
+                           seed=4578, min_iterations=None,
                            success_prob=0.9999, lo_iterations=None):
     # params:
     # x1, x2 - (n, 2) arrays of corresponding *calibrated* (normalized) image

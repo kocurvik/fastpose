@@ -96,7 +96,7 @@ def _principal_point(pp):
 
 def estimate_relative_pose_with_monodepth(
         x1, x2, d1, d2, estimate_shift=False, iterations=1000, max_error=0.002,
-        max_reproj_error=0.016, weight_sampson=1.0, seed=None,
+        max_reproj_error=0.016, weight_sampson=1.0, seed=4578,
         min_iterations=None, success_prob=0.9999, lo_iterations=None):
     # params:
     # x1, x2 - (n, 2) arrays of *calibrated* image points
@@ -138,7 +138,7 @@ def estimate_relative_pose_with_monodepth(
 def estimate_shared_focal_relative_pose_with_monodepth(
         x1, x2, d1, d2, principal_point1=None, principal_point2=None,
         iterations=1000, max_error=2.0, max_reproj_error=16.0,
-        weight_sampson=1.0, seed=None, min_iterations=None,
+        weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=None):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length
     # shared by both cameras; principal_point* optional (cx, cy), zero if
@@ -172,7 +172,7 @@ def estimate_shared_focal_relative_pose_with_monodepth(
 def estimate_varying_focal_relative_pose_with_monodepth(
         x1, x2, d1, d2, principal_point1=None, principal_point2=None,
         iterations=1000, max_error=2.0, max_reproj_error=16.0,
-        weight_sampson=1.0, seed=None, min_iterations=None,
+        weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=None):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length per
     # camera; principal_point* optional (cx, cy), zero if omitted.

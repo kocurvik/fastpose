@@ -19,7 +19,7 @@ def _get_default_estimator():
     return _default_estimator
 
 
-def estimate_absolute_pose(x, X, iterations=1000, max_error=0.002, seed=None,
+def estimate_absolute_pose(x, X, iterations=1000, max_error=0.002, seed=4578,
                            min_iterations=None, success_prob=0.9999,
                            lo_iterations=None):
     # params:

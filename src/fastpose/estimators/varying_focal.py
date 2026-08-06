@@ -46,7 +46,7 @@ def _data_tuple(x1, x2, pp1, pp2):
 
 def estimate_relative_pose_with_varying_focals(
         x1, x2, principal_point1=None, principal_point2=None,
-        iterations=1000, max_error=2.0, seed=None, min_iterations=None,
+        iterations=1000, max_error=2.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=None):
     # x1, x2 are image coordinates in each camera's native pixel-like units.
     # principal_point* are optional (cx, cy); if omitted, zero is assumed.
