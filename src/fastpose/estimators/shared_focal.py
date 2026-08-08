@@ -94,7 +94,7 @@ def estimate_relative_pose_with_shared_focal(
     if lo_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner()
         inlier_data = _data_tuple(x1n[inliers], x2n[inliers], pp1n, pp2n)
-        refined = np.empty(13)
+        refined = np.empty(14)
         if final_refiner.refine(inlier_data, model, refined,
                                 (max_error * scale) ** 2,
                                 final_refiner.num_iterations):
