@@ -35,13 +35,17 @@ def _get_final_refiner():
 def estimate_absolute_pose_with_focal(x, X, principal_point=None,
                                       iterations=1000, max_error=2.0,
                                       seed=4578, min_iterations=None,
-                                      success_prob=0.9999, lo_iterations=None):
+                                      success_prob=0.9999, lo_iterations=25,
+                                      final_refinement_iterations=100):
     # params:
     # x - (n, 2) array of image points in pixel coordinates (square pixels,
     #     unknown focal length)
     # X - (n, 3) array of corresponding 3D world points
     # principal_point - optional (cx, cy); if omitted, zero is assumed
     # max_error - truncated reprojection threshold in pixels
+    # final_refinement_iterations - LM step budget for the final Cauchy-loss
+    #                 polish pass on the RANSAC inliers; independent of
+    #                 lo_iterations. Defaults to 100; 0 disables the pass
     # returns R, t, f, num_inliers, inliers with
     # lambda * (x, y, 1) = diag(f, f, 1) (R X + t)
     x = np.ascontiguousarray(x, dtype=np.float64)
@@ -71,7 +75,7 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
         R, t, f, x, X, max_error)
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if lo_iterations != 0 and num_inliers > 0:
+    if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner()
         inlier_data = (np.ascontiguousarray(x[inliers, 0]),
                        np.ascontiguousarray(x[inliers, 1]),
@@ -79,8 +83,11 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
                        np.ascontiguousarray(X[inliers, 1]),
                        np.ascontiguousarray(X[inliers, 2]))
         refined = np.empty(13)
+        num_final_iterations = (final_refiner.num_iterations
+                                if final_refinement_iterations is None
+                                else final_refinement_iterations)
         if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
-                                final_refiner.num_iterations):
+                                num_final_iterations):
             R_c = refined[:9].reshape(3, 3).copy()
             t_c = refined[9:12].copy()
             f_c = float(refined[12])

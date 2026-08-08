@@ -114,7 +114,8 @@ def _principal_point(pp):
 def estimate_relative_pose_with_monodepth(
         x1, x2, d1, d2, estimate_shift=False, iterations=1000, max_error=0.002,
         max_reproj_error=0.016, weight_sampson=1.0, seed=4578,
-        min_iterations=None, success_prob=0.9999, lo_iterations=None):
+        min_iterations=None, success_prob=0.9999, lo_iterations=25,
+        final_refinement_iterations=100):
     # params:
     # x1, x2 - (n, 2) arrays of *calibrated* image points
     # d1, d2 - (n,) monocular depths per image (scale-invariant, or
@@ -125,6 +126,9 @@ def estimate_relative_pose_with_monodepth(
     # max_reproj_error - reprojection threshold (same units) that sets the
     #          hybrid LO weighting; None or 0 disables the reprojection term
     # weight_sampson - weight of the Sampson term in the hybrid LO cost
+    # final_refinement_iterations - LM step budget for the final Cauchy-loss
+    #          polish pass on the RANSAC inliers; independent of
+    #          lo_iterations. Defaults to 100; 0 disables the pass
     # returns R, t, scale, shift1, shift2, num_inliers, inliers with
     # scale * (d2 + shift2) * x2h = R ((d1 + shift1) * x1h) + t for inliers
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
@@ -151,14 +155,17 @@ def estimate_relative_pose_with_monodepth(
         R, t, x1, x2, max_error)
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if lo_iterations != 0 and num_inliers > 0:
+    if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner(kind)
         inlier_data = _monodepth_data(
             x1[inliers], x2[inliers], d1[inliers], d2[inliers],
             _scale_reproj(max_error, max_reproj_error), weight_sampson)
         refined = np.empty(15)
+        num_final_iterations = (final_refiner.num_iterations
+                                if final_refinement_iterations is None
+                                else final_refinement_iterations)
         if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
-                                final_refiner.num_iterations):
+                                num_final_iterations):
             R_c = refined[:9].reshape(3, 3).copy()
             t_c = refined[9:12].copy()
             scale_c = float(refined[12])
@@ -176,10 +183,14 @@ def estimate_shared_focal_relative_pose_with_monodepth(
         x1, x2, d1, d2, principal_point1=None, principal_point2=None,
         iterations=1000, max_error=2.0, max_reproj_error=16.0,
         weight_sampson=1.0, seed=4578, min_iterations=None,
-        success_prob=0.9999, lo_iterations=None):
+        success_prob=0.9999, lo_iterations=25,
+        final_refinement_iterations=100):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length
     # shared by both cameras; principal_point* optional (cx, cy), zero if
-    # omitted. Thresholds in pixels. Returns
+    # omitted. Thresholds in pixels. final_refinement_iterations is the LM
+    # step budget for the final Cauchy-loss polish pass on the RANSAC
+    # inliers, independent of lo_iterations; defaults to 100, 0 disables the
+    # pass. Returns
     # R, t, f, scale, num_inliers, inliers.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
     x1c = x1 - _principal_point(principal_point1)
@@ -205,14 +216,17 @@ def estimate_shared_focal_relative_pose_with_monodepth(
         R, t, f, f, x1c, x2c, max_error)
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if lo_iterations != 0 and num_inliers > 0:
+    if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner('shared-focal')
         inlier_data = _monodepth_data(
             x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
             _scale_reproj(max_error, max_reproj_error), weight_sampson)
         refined = np.empty(15)
+        num_final_iterations = (final_refiner.num_iterations
+                                if final_refinement_iterations is None
+                                else final_refinement_iterations)
         if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
-                                final_refiner.num_iterations):
+                                num_final_iterations):
             R_c = refined[:9].reshape(3, 3).copy()
             t_c = refined[9:12].copy()
             f_c = float(refined[12])
@@ -229,10 +243,14 @@ def estimate_varying_focal_relative_pose_with_monodepth(
         x1, x2, d1, d2, principal_point1=None, principal_point2=None,
         iterations=1000, max_error=2.0, max_reproj_error=16.0,
         weight_sampson=1.0, seed=4578, min_iterations=None,
-        success_prob=0.9999, lo_iterations=None):
+        success_prob=0.9999, lo_iterations=25,
+        final_refinement_iterations=100):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length per
     # camera; principal_point* optional (cx, cy), zero if omitted.
-    # Thresholds in pixels. Returns R, t, f1, f2, scale, num_inliers, inliers.
+    # Thresholds in pixels. final_refinement_iterations is the LM step
+    # budget for the final Cauchy-loss polish pass on the RANSAC inliers,
+    # independent of lo_iterations; defaults to 100, 0 disables the pass.
+    # Returns R, t, f1, f2, scale, num_inliers, inliers.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
     x1c = x1 - _principal_point(principal_point1)
     x2c = x2 - _principal_point(principal_point2)
@@ -258,14 +276,17 @@ def estimate_varying_focal_relative_pose_with_monodepth(
         R, t, f1, f2, x1c, x2c, max_error)
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if lo_iterations != 0 and num_inliers > 0:
+    if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner('varying-focal')
         inlier_data = _monodepth_data(
             x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
             _scale_reproj(max_error, max_reproj_error), weight_sampson)
         refined = np.empty(15)
+        num_final_iterations = (final_refiner.num_iterations
+                                if final_refinement_iterations is None
+                                else final_refinement_iterations)
         if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
-                                final_refiner.num_iterations):
+                                num_final_iterations):
             R_c = refined[:9].reshape(3, 3).copy()
             t_c = refined[9:12].copy()
             f1_c = float(refined[12])

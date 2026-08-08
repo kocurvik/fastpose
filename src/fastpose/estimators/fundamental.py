@@ -62,7 +62,7 @@ def _get_final_refiner():
 
 def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
                          min_iterations=None, success_prob=0.9999,
-                         lo_iterations=None):
+                         lo_iterations=25, final_refinement_iterations=100):
     # params:
     # x1, x2 - (n, 2) arrays of corresponding points
     # iterations - maximum number of RANSAC iterations
@@ -70,8 +70,10 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
     #                  termination may stop early; defaults to `iterations`
     #                  (fixed iteration count)
     # lo_iterations - LM step budget per local optimization; 0 disables
-    #                 local optimization (plain RANSAC), None uses the
-    #                 refiner default
+    #                 local optimization (plain RANSAC)
+    # final_refinement_iterations - LM step budget for the final Cauchy-loss
+    #                 polish pass on the RANSAC inliers; independent of
+    #                 lo_iterations. Defaults to 100; 0 disables the pass
     # returns best_model, best_num_inliers, best_inliers
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
@@ -92,13 +94,16 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers,
     # done in the same normalized frame/threshold as the RANSAC pipeline
-    if lo_iterations != 0 and num_inliers > 0:
+    if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner()
         inlier_data = point_columns(x1n[inliers], x2n[inliers])
         refined = np.empty(9)
+        num_final_iterations = (final_refiner.num_iterations
+                                if final_refinement_iterations is None
+                                else final_refinement_iterations)
         if final_refiner.refine(inlier_data, model, refined,
                                 (max_error * scale) ** 2,
-                                final_refiner.num_iterations):
+                                num_final_iterations):
             F_c = T.T @ refined.reshape(3, 3) @ T
             _, inliers_c, num_inliers_c = SampsonScorer.score_numpy(
                 F_c, x1, x2, max_error)

@@ -58,9 +58,13 @@ def _data_tuple(x1, x2, pp1, pp2):
 def estimate_relative_pose_with_varying_focals(
         x1, x2, principal_point1=None, principal_point2=None,
         iterations=1000, max_error=2.0, seed=4578, min_iterations=None,
-        success_prob=0.9999, lo_iterations=None):
+        success_prob=0.9999, lo_iterations=25,
+        final_refinement_iterations=100):
     # x1, x2 are image coordinates in each camera's native pixel-like units.
     # principal_point* are optional (cx, cy); if omitted, zero is assumed.
+    # final_refinement_iterations is the LM step budget for the final
+    # Cauchy-loss polish pass on the RANSAC inliers, independent of
+    # lo_iterations; defaults to 100, 0 disables the pass.
     # returns R, t, f1, f2, num_inliers, inliers
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
@@ -92,13 +96,16 @@ def estimate_relative_pose_with_varying_focals(
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers,
     # done in the same normalized frame/threshold as the RANSAC pipeline
-    if lo_iterations != 0 and num_inliers > 0:
+    if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner()
         inlier_data = _data_tuple(x1n[inliers], x2n[inliers], pp1n, pp2n)
         refined = np.empty(14)
+        num_final_iterations = (final_refiner.num_iterations
+                                if final_refinement_iterations is None
+                                else final_refinement_iterations)
         if final_refiner.refine(inlier_data, model, refined,
                                 (max_error * scale) ** 2,
-                                final_refiner.num_iterations):
+                                num_final_iterations):
             R_c = refined[:9].reshape(3, 3).copy()
             t_c = refined[9:12].copy()
             f1_c = float(refined[12] / scale)

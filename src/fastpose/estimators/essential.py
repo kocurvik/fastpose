@@ -38,12 +38,16 @@ def _get_final_refiner():
 
 def estimate_relative_pose(x1, x2, iterations=1000, max_error=0.002,
                            seed=4578, min_iterations=None,
-                           success_prob=0.9999, lo_iterations=None):
+                           success_prob=0.9999, lo_iterations=25,
+                           final_refinement_iterations=100):
     # params:
     # x1, x2 - (n, 2) arrays of corresponding *calibrated* (normalized) image
     #          points; for pixel points apply (x - c) / f first
     # max_error - Sampson threshold in the same normalized units
     #             (pixel threshold divided by focal length)
+    # final_refinement_iterations - LM step budget for the final Cauchy-loss
+    #                 polish pass on the RANSAC inliers; independent of
+    #                 lo_iterations. Defaults to 100; 0 disables the pass
     # returns best_R, best_t (unit norm, x2 ~ R x1 + t), num_inliers, inliers
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
@@ -63,12 +67,15 @@ def estimate_relative_pose(x1, x2, iterations=1000, max_error=0.002,
     _, inliers, num_inliers = PoseSampsonScorer.score_numpy(R, t, x1, x2, max_error)
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if lo_iterations != 0 and num_inliers > 0:
+    if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner()
         inlier_data = point_columns(x1[inliers], x2[inliers])
         refined = np.empty(12)
+        num_final_iterations = (final_refiner.num_iterations
+                                if final_refinement_iterations is None
+                                else final_refinement_iterations)
         if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
-                                final_refiner.num_iterations):
+                                num_final_iterations):
             R_c = refined[:9].reshape(3, 3).copy()
             t_c = refined[9:12].copy()
             _, inliers_c, num_inliers_c = PoseSampsonScorer.score_numpy(
