@@ -4,11 +4,13 @@ import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
 from fastpose.estimators.utils import normalize_points
+from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.varying_focal import LMVaryingFocalPoseRefiner
 from fastpose.scorers.sampson import VaryingFocalPoseSampsonScorer
 from fastpose.solvers.varying_focal import SevenPointVaryingFocalSolver
 
 _default_estimator = None
+_final_refiner = None
 
 
 def _get_default_estimator():
@@ -20,6 +22,15 @@ def _get_default_estimator():
             LMVaryingFocalPoseRefiner(),
         )
     return _default_estimator
+
+
+def _get_final_refiner():
+    # loss for the final polish pass on RANSAC inliers only; see
+    # refiners/losses.py for the available Loss objects
+    global _final_refiner
+    if _final_refiner is None:
+        _final_refiner = LMVaryingFocalPoseRefiner(loss=CauchyLoss())
+    return _final_refiner
 
 
 def _principal_point(pp):
@@ -78,4 +89,23 @@ def estimate_relative_pose_with_varying_focals(
     f2 = float(model[13] / scale)
     _, inliers, num_inliers = VaryingFocalPoseSampsonScorer.score_numpy(
         R, t, f1, f2, pp1, pp2, x1, x2, max_error)
+
+    # final polish: robust-loss refinement restricted to the RANSAC inliers,
+    # done in the same normalized frame/threshold as the RANSAC pipeline
+    if lo_iterations != 0 and num_inliers > 0:
+        final_refiner = _get_final_refiner()
+        inlier_data = _data_tuple(x1n[inliers], x2n[inliers], pp1n, pp2n)
+        refined = np.empty(14)
+        if final_refiner.refine(inlier_data, model, refined,
+                                (max_error * scale) ** 2,
+                                final_refiner.num_iterations):
+            R_c = refined[:9].reshape(3, 3).copy()
+            t_c = refined[9:12].copy()
+            f1_c = float(refined[12] / scale)
+            f2_c = float(refined[13] / scale)
+            _, inliers_c, num_inliers_c = VaryingFocalPoseSampsonScorer.score_numpy(
+                R_c, t_c, f1_c, f2_c, pp1, pp2, x1, x2, max_error)
+            R, t, f1, f2 = R_c, t_c, f1_c, f2_c
+            inliers, num_inliers = inliers_c, num_inliers_c
+
     return R, t, f1, f2, num_inliers, inliers

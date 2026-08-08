@@ -26,6 +26,7 @@ error, whose threshold `max_reproj_error` sets the relative weighting
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
+from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.monodepth import (LMMonoDepthPoseRefiner,
                                 LMMonoDepthSharedFocalPoseRefiner,
                                 LMMonoDepthShiftPoseRefiner,
@@ -37,6 +38,14 @@ from fastpose.solvers.monodepth import (MonoDepthP3PSolver, MonoDepthSharedFocal
                                MonoDepthVaryingFocalSolver)
 
 _estimators = {}
+_final_refiners = {}
+
+_REFINER_CLS = {
+    'calibrated': LMMonoDepthPoseRefiner,
+    'calibrated-shift': LMMonoDepthShiftPoseRefiner,
+    'shared-focal': LMMonoDepthSharedFocalPoseRefiner,
+    'varying-focal': LMMonoDepthVaryingFocalPoseRefiner,
+}
 
 
 def _get_estimator(kind):
@@ -60,6 +69,14 @@ def _get_estimator(kind):
                 MonoDepthFocalPoseSampsonScorer(),
                 LMMonoDepthVaryingFocalPoseRefiner())
     return _estimators[kind]
+
+
+def _get_final_refiner(kind):
+    # loss for the final polish pass on RANSAC inliers only; see
+    # refiners/losses.py for the available Loss objects
+    if kind not in _final_refiners:
+        _final_refiners[kind] = _REFINER_CLS[kind](loss=CauchyLoss())
+    return _final_refiners[kind]
 
 
 def _monodepth_data(x1, x2, d1, d2, scale_reproj, weight_sampson):
@@ -115,8 +132,8 @@ def estimate_relative_pose_with_monodepth(
                            _scale_reproj(max_error, max_reproj_error),
                            weight_sampson)
 
-    estimator = _get_estimator('calibrated-shift' if estimate_shift
-                               else 'calibrated')
+    kind = 'calibrated-shift' if estimate_shift else 'calibrated'
+    estimator = _get_estimator(kind)
     model, score, num_inliers, _ = estimator.estimate(
         data, len(x1), max_error, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
@@ -132,6 +149,26 @@ def estimate_relative_pose_with_monodepth(
     shift2 = float(model[14])
     _, inliers, num_inliers = MonoDepthPoseSampsonScorer.score_numpy(
         R, t, x1, x2, max_error)
+
+    # final polish: robust-loss refinement restricted to the RANSAC inliers
+    if lo_iterations != 0 and num_inliers > 0:
+        final_refiner = _get_final_refiner(kind)
+        inlier_data = _monodepth_data(
+            x1[inliers], x2[inliers], d1[inliers], d2[inliers],
+            _scale_reproj(max_error, max_reproj_error), weight_sampson)
+        refined = np.empty(15)
+        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+                                final_refiner.num_iterations):
+            R_c = refined[:9].reshape(3, 3).copy()
+            t_c = refined[9:12].copy()
+            scale_c = float(refined[12])
+            shift1_c = float(refined[13])
+            shift2_c = float(refined[14])
+            _, inliers_c, num_inliers_c = MonoDepthPoseSampsonScorer.score_numpy(
+                R_c, t_c, x1, x2, max_error)
+            R, t, scale, shift1, shift2 = R_c, t_c, scale_c, shift1_c, shift2_c
+            inliers, num_inliers = inliers_c, num_inliers_c
+
     return R, t, scale, shift1, shift2, num_inliers, inliers
 
 
@@ -166,6 +203,25 @@ def estimate_shared_focal_relative_pose_with_monodepth(
     scale = float(model[14])
     _, inliers, num_inliers = MonoDepthFocalPoseSampsonScorer.score_numpy(
         R, t, f, f, x1c, x2c, max_error)
+
+    # final polish: robust-loss refinement restricted to the RANSAC inliers
+    if lo_iterations != 0 and num_inliers > 0:
+        final_refiner = _get_final_refiner('shared-focal')
+        inlier_data = _monodepth_data(
+            x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
+            _scale_reproj(max_error, max_reproj_error), weight_sampson)
+        refined = np.empty(15)
+        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+                                final_refiner.num_iterations):
+            R_c = refined[:9].reshape(3, 3).copy()
+            t_c = refined[9:12].copy()
+            f_c = float(refined[12])
+            scale_c = float(refined[14])
+            _, inliers_c, num_inliers_c = MonoDepthFocalPoseSampsonScorer.score_numpy(
+                R_c, t_c, f_c, f_c, x1c, x2c, max_error)
+            R, t, f, scale = R_c, t_c, f_c, scale_c
+            inliers, num_inliers = inliers_c, num_inliers_c
+
     return R, t, f, scale, num_inliers, inliers
 
 
@@ -200,4 +256,24 @@ def estimate_varying_focal_relative_pose_with_monodepth(
     scale = float(model[14])
     _, inliers, num_inliers = MonoDepthFocalPoseSampsonScorer.score_numpy(
         R, t, f1, f2, x1c, x2c, max_error)
+
+    # final polish: robust-loss refinement restricted to the RANSAC inliers
+    if lo_iterations != 0 and num_inliers > 0:
+        final_refiner = _get_final_refiner('varying-focal')
+        inlier_data = _monodepth_data(
+            x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
+            _scale_reproj(max_error, max_reproj_error), weight_sampson)
+        refined = np.empty(15)
+        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+                                final_refiner.num_iterations):
+            R_c = refined[:9].reshape(3, 3).copy()
+            t_c = refined[9:12].copy()
+            f1_c = float(refined[12])
+            f2_c = float(refined[13])
+            scale_c = float(refined[14])
+            _, inliers_c, num_inliers_c = MonoDepthFocalPoseSampsonScorer.score_numpy(
+                R_c, t_c, f1_c, f2_c, x1c, x2c, max_error)
+            R, t, f1, f2, scale = R_c, t_c, f1_c, f2_c, scale_c
+            inliers, num_inliers = inliers_c, num_inliers_c
+
     return R, t, f1, f2, scale, num_inliers, inliers

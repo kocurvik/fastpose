@@ -16,6 +16,8 @@ import math
 import numpy as np
 from numba import njit
 
+from fastpose.refiners.losses import TruncatedLoss
+
 STATE_SIZE = 19
 
 
@@ -152,69 +154,82 @@ def epipolar_jacobian_basis(U, Vt, sigma, B):
                 B[6, 3 * i + j] = U[i, 1] * Vt[1, j]
 
 
-@njit(cache=True, fastmath=True)
-def accumulate_sampson_normal_eqs(data, f, B, JtJ, Jtr, max_error_sq):
-    # normal equations of the truncated Sampson residuals s_i for the tangent
-    # basis B: JtJ += J_i J_i^T, Jtr += J_i s_i with J_i[p] = ds_i/dF . B[p].
-    # Points outside the threshold get zero weight (truncated loss), so the
-    # minimized cost matches the MSAC score used for model selection.
-    # Returns the number of contributing residuals.
-    x1_x, x1_y, x2_x, x2_y = data
-    n = x1_x.shape[0]
-    num_tangent = B.shape[0]
+def build_sampson_accumulate(loss):
+    # builds the normal equations of the Sampson residuals s_i for the
+    # tangent basis B: JtJ += w_i J_i J_i^T, Jtr += w_i J_i s_i with
+    # J_i[p] = ds_i/dF . B[p] and w_i = loss.weight(s_i^2, max_error_sq); a
+    # zero weight drops the point entirely (for TruncatedLoss this is
+    # exactly the old hard truncation, so the skip-heavy-work fast path is
+    # preserved). `loss` is bound as a compile-time constant, the same
+    # closure pattern build_lm_refine uses for its own kernels.
+    weight_fn = loss.weight
 
-    dsdF = np.empty(9)
-    J = np.empty(num_tangent)
-    for p in range(num_tangent):
-        Jtr[p] = 0.0
-        for q in range(num_tangent):
-            JtJ[p, q] = 0.0
+    @njit(cache=True, fastmath=True)
+    def _accumulate_sampson_normal_eqs(data, f, B, JtJ, Jtr, max_error_sq):
+        # returns the number of contributing residuals
+        x1_x, x1_y, x2_x, x2_y = data
+        n = x1_x.shape[0]
+        num_tangent = B.shape[0]
 
-    num_residuals = 0
-    for i in range(n):
-        x = x1_x[i]
-        y = x1_y[i]
-        xp = x2_x[i]
-        yp = x2_y[i]
-        fx1_0 = f[0] * x + f[1] * y + f[2]
-        fx1_1 = f[3] * x + f[4] * y + f[5]
-        fx1_2 = f[6] * x + f[7] * y + f[8]
-        ftx2_0 = f[0] * xp + f[3] * yp + f[6]
-        ftx2_1 = f[1] * xp + f[4] * yp + f[7]
-        residual = xp * fx1_0 + yp * fx1_1 + fx1_2
-        denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
-                       + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
-        r2 = residual * residual
-        if r2 >= max_error_sq * denominator:
-            continue  # truncated loss: zero weight outside threshold
-        num_residuals += 1
+        dsdF = np.empty(9)
+        J = np.empty(num_tangent)
+        for p in range(num_tangent):
+            Jtr[p] = 0.0
+            for q in range(num_tangent):
+                JtJ[p, q] = 0.0
 
-        # s_i = residual / sqrt(denominator); ds_i/dF as flat 9-vector
-        inv_sqrt_den = 1.0 / math.sqrt(denominator)
-        c = residual * inv_sqrt_den / denominator
-        s_i = residual * inv_sqrt_den
+        num_residuals = 0
+        for i in range(n):
+            x = x1_x[i]
+            y = x1_y[i]
+            xp = x2_x[i]
+            yp = x2_y[i]
+            fx1_0 = f[0] * x + f[1] * y + f[2]
+            fx1_1 = f[3] * x + f[4] * y + f[5]
+            fx1_2 = f[6] * x + f[7] * y + f[8]
+            ftx2_0 = f[0] * xp + f[3] * yp + f[6]
+            ftx2_1 = f[1] * xp + f[4] * yp + f[7]
+            residual = xp * fx1_0 + yp * fx1_1 + fx1_2
+            denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
+                           + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
+            if denominator <= 0.0:
+                continue
 
-        dsdF[0] = inv_sqrt_den * xp * x - c * (fx1_0 * x + xp * ftx2_0)
-        dsdF[1] = inv_sqrt_den * xp * y - c * (fx1_0 * y + xp * ftx2_1)
-        dsdF[2] = inv_sqrt_den * xp - c * fx1_0
-        dsdF[3] = inv_sqrt_den * yp * x - c * (fx1_1 * x + yp * ftx2_0)
-        dsdF[4] = inv_sqrt_den * yp * y - c * (fx1_1 * y + yp * ftx2_1)
-        dsdF[5] = inv_sqrt_den * yp - c * fx1_1
-        dsdF[6] = inv_sqrt_den * x - c * ftx2_0
-        dsdF[7] = inv_sqrt_den * y - c * ftx2_1
-        dsdF[8] = inv_sqrt_den
+            # s_i = residual / sqrt(denominator); ds_i/dF as flat 9-vector
+            inv_sqrt_den = 1.0 / math.sqrt(denominator)
+            s_i = residual * inv_sqrt_den
+            w = weight_fn(s_i * s_i, max_error_sq)
+            if w <= 0.0:
+                continue
+            num_residuals += 1
+
+            c = s_i / denominator
+            dsdF[0] = inv_sqrt_den * xp * x - c * (fx1_0 * x + xp * ftx2_0)
+            dsdF[1] = inv_sqrt_den * xp * y - c * (fx1_0 * y + xp * ftx2_1)
+            dsdF[2] = inv_sqrt_den * xp - c * fx1_0
+            dsdF[3] = inv_sqrt_den * yp * x - c * (fx1_1 * x + yp * ftx2_0)
+            dsdF[4] = inv_sqrt_den * yp * y - c * (fx1_1 * y + yp * ftx2_1)
+            dsdF[5] = inv_sqrt_den * yp - c * fx1_1
+            dsdF[6] = inv_sqrt_den * x - c * ftx2_0
+            dsdF[7] = inv_sqrt_den * y - c * ftx2_1
+            dsdF[8] = inv_sqrt_den
+
+            for p in range(num_tangent):
+                acc = 0.0
+                for j in range(9):
+                    acc += dsdF[j] * B[p, j]
+                J[p] = acc
+            for p in range(num_tangent):
+                Jtr[p] += w * J[p] * s_i
+                for q in range(p, num_tangent):
+                    JtJ[p, q] += w * J[p] * J[q]
 
         for p in range(num_tangent):
-            acc = 0.0
-            for j in range(9):
-                acc += dsdF[j] * B[p, j]
-            J[p] = acc
-        for p in range(num_tangent):
-            Jtr[p] += J[p] * s_i
-            for q in range(p, num_tangent):
-                JtJ[p, q] += J[p] * J[q]
+            for q in range(p):
+                JtJ[p, q] = JtJ[q, p]
+        return num_residuals
 
-    for p in range(num_tangent):
-        for q in range(p):
-            JtJ[p, q] = JtJ[q, p]
-    return num_residuals
+    return _accumulate_sampson_normal_eqs
+
+
+accumulate_sampson_normal_eqs = build_sampson_accumulate(TruncatedLoss())

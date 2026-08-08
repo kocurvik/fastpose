@@ -6,10 +6,12 @@ import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
 from fastpose.refiners.absolute_focal import LMAbsolutePoseFocalRefiner
+from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.reprojection import FocalReprojectionScorer
 from fastpose.solvers.p4pf import P4PFSolver
 
 _default_estimator = None
+_final_refiner = None
 
 
 def _get_default_estimator():
@@ -19,6 +21,15 @@ def _get_default_estimator():
                                              FocalReprojectionScorer(),
                                              LMAbsolutePoseFocalRefiner())
     return _default_estimator
+
+
+def _get_final_refiner():
+    # loss for the final polish pass on RANSAC inliers only; see
+    # refiners/losses.py for the available Loss objects
+    global _final_refiner
+    if _final_refiner is None:
+        _final_refiner = LMAbsolutePoseFocalRefiner(loss=CauchyLoss())
+    return _final_refiner
 
 
 def estimate_absolute_pose_with_focal(x, X, principal_point=None,
@@ -58,4 +69,23 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
     f = float(model[12])
     _, inliers, num_inliers = FocalReprojectionScorer.score_numpy(
         R, t, f, x, X, max_error)
+
+    # final polish: robust-loss refinement restricted to the RANSAC inliers
+    if lo_iterations != 0 and num_inliers > 0:
+        final_refiner = _get_final_refiner()
+        inlier_data = (np.ascontiguousarray(x[inliers, 0]),
+                       np.ascontiguousarray(x[inliers, 1]),
+                       np.ascontiguousarray(X[inliers, 0]),
+                       np.ascontiguousarray(X[inliers, 1]),
+                       np.ascontiguousarray(X[inliers, 2]))
+        refined = np.empty(13)
+        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+                                final_refiner.num_iterations):
+            R_c = refined[:9].reshape(3, 3).copy()
+            t_c = refined[9:12].copy()
+            f_c = float(refined[12])
+            _, inliers_c, num_inliers_c = FocalReprojectionScorer.score_numpy(
+                R_c, t_c, f_c, x, X, max_error)
+            R, t, f, inliers, num_inliers = R_c, t_c, f_c, inliers_c, num_inliers_c
+
     return R, t, f, num_inliers, inliers

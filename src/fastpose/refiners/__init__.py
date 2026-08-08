@@ -1,3 +1,4 @@
+from fastpose.refiners.losses import CauchyLoss, TruncatedCauchyLoss, TruncatedLoss
 from fastpose.refiners.essential import LMEssentialRefiner
 from fastpose.refiners.fundamental import LMFundamentalRefiner
 from fastpose.refiners.varying_focal import LMVaryingFocalPoseRefiner

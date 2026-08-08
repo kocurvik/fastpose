@@ -13,9 +13,11 @@ from numba import njit
 
 from fastpose.refiners.essential import _tangent_basis
 from fastpose.refiners.lm import build_lm_refine
-from fastpose.refiners.utils import accumulate_sampson_normal_eqs, mat3_mul, rodrigues
-from fastpose.scorers.sampson import (model_to_fundamental,
-                             varying_focal_pose_sampson_score)
+from fastpose.refiners.losses import TruncatedLoss
+from fastpose.refiners.utils import (accumulate_sampson_normal_eqs, build_sampson_accumulate,
+                            mat3_mul, rodrigues)
+from fastpose.scorers.sampson import (build_varying_focal_pose_sampson_cost,
+                             model_to_fundamental, varying_focal_pose_sampson_score)
 from fastpose.solvers.varying_focal import MODEL_SIZE
 
 STATE_SIZE = 14
@@ -70,51 +72,79 @@ def _apply_step(state, delta, state_new):
     state_new[13] = state[13] + delta[6]
 
 
-@njit(cache=True)
-def _accumulate(data, f, state, JtJ, Jtr, max_error_sq):
-    x1_x, x1_y, x2_x, x2_y, pp1x, pp1y, pp2x, pp2y = data
-    base_f = np.empty(9)
-    model = np.empty(MODEL_SIZE)
-    _state_to_model(state, model)
-    if not model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, base_f):
-        return 0
-
-    B = np.empty((NUM_TANGENT, 9))
-    state_plus = np.empty(STATE_SIZE)
-    state_minus = np.empty(STATE_SIZE)
-    model_plus = np.empty(MODEL_SIZE)
-    model_minus = np.empty(MODEL_SIZE)
-    f_plus = np.empty(9)
-    f_minus = np.empty(9)
-    delta = np.zeros(NUM_TANGENT)
-    h = 1e-6
-    inv_2h = 0.5 / h
-    for p in range(NUM_TANGENT):
-        delta[p] = h
-        _apply_step(state, delta, state_plus)
-        delta[p] = -h
-        _apply_step(state, delta, state_minus)
-        delta[p] = 0.0
-        _state_to_model(state_plus, model_plus)
-        _state_to_model(state_minus, model_minus)
-        if not model_to_fundamental(model_plus, pp1x, pp1y, pp2x, pp2y, f_plus):
+def _make_accumulate(sampson_accumulate):
+    @njit(cache=True)
+    def _accumulate(data, f, state, JtJ, Jtr, max_error_sq):
+        x1_x, x1_y, x2_x, x2_y, pp1x, pp1y, pp2x, pp2y = data
+        base_f = np.empty(9)
+        model = np.empty(MODEL_SIZE)
+        _state_to_model(state, model)
+        if not model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, base_f):
             return 0
-        if not model_to_fundamental(model_minus, pp1x, pp1y, pp2x, pp2y, f_minus):
-            return 0
-        for j in range(9):
-            B[p, j] = (f_plus[j] - f_minus[j]) * inv_2h
 
-    return accumulate_sampson_normal_eqs(
-        (x1_x, x1_y, x2_x, x2_y), base_f, B, JtJ, Jtr, max_error_sq)
+        B = np.empty((NUM_TANGENT, 9))
+        state_plus = np.empty(STATE_SIZE)
+        state_minus = np.empty(STATE_SIZE)
+        model_plus = np.empty(MODEL_SIZE)
+        model_minus = np.empty(MODEL_SIZE)
+        f_plus = np.empty(9)
+        f_minus = np.empty(9)
+        delta = np.zeros(NUM_TANGENT)
+        h = 1e-6
+        inv_2h = 0.5 / h
+        for p in range(NUM_TANGENT):
+            delta[p] = h
+            _apply_step(state, delta, state_plus)
+            delta[p] = -h
+            _apply_step(state, delta, state_minus)
+            delta[p] = 0.0
+            _state_to_model(state_plus, model_plus)
+            _state_to_model(state_minus, model_minus)
+            if not model_to_fundamental(model_plus, pp1x, pp1y, pp2x, pp2y, f_plus):
+                return 0
+            if not model_to_fundamental(model_minus, pp1x, pp1y, pp2x, pp2y, f_minus):
+                return 0
+            for j in range(9):
+                B[p, j] = (f_plus[j] - f_minus[j]) * inv_2h
 
+        return sampson_accumulate(
+            (x1_x, x1_y, x2_x, x2_y), base_f, B, JtJ, Jtr, max_error_sq)
+
+    return _accumulate
+
+
+_accumulate_truncated = _make_accumulate(accumulate_sampson_normal_eqs)
+_accumulate = _accumulate_truncated  # back-compat alias for the default kernel
 
 _refine_varying_focal_lm = build_lm_refine(
-    _init_state, _state_to_model, _accumulate, _apply_step,
+    _init_state, _state_to_model, _accumulate_truncated, _apply_step,
     varying_focal_pose_sampson_score, STATE_SIZE, NUM_TANGENT, MODEL_SIZE)
+
+_final_kernels = {}
+
+
+def _get_final_refine(loss):
+    # lazily compiles (and caches) the LM kernel for a non-default loss; see
+    # essential.py's _get_final_refine for the general rationale
+    key = type(loss)
+    if key not in _final_kernels:
+        accumulate_final = _make_accumulate(build_sampson_accumulate(loss))
+        cost_final = build_varying_focal_pose_sampson_cost(loss)
+        _final_kernels[key] = build_lm_refine(
+            _init_state, _state_to_model, accumulate_final, _apply_step,
+            cost_final, STATE_SIZE, NUM_TANGENT, MODEL_SIZE)
+    return _final_kernels[key]
 
 
 class LMVaryingFocalPoseRefiner():
-    def __init__(self, num_iterations=15):
+    # `loss` selects the robust cost/weighting (TruncatedLoss by default,
+    # matching every RANSAC-internal use; pass e.g. CauchyLoss() or
+    # TruncatedCauchyLoss() for a final polish pass on an inlier-only
+    # subset).
+    def __init__(self, num_iterations=15, loss=TruncatedLoss()):
         self.num_iterations = num_iterations
+        self.loss = loss
+        if not isinstance(loss, TruncatedLoss):
+            self.refine = _get_final_refine(loss)
 
     refine = staticmethod(_refine_varying_focal_lm)

@@ -242,3 +242,75 @@ class SharedFocalPoseSampsonScorer():
     def score_numpy(R, t, f, pp1, pp2, x1, x2, max_error):
         return VaryingFocalPoseSampsonScorer.score_numpy(
             R, t, f, f, pp1, pp2, x1, x2, max_error)
+
+
+# ---------------------------------------------------------------------------
+# loss-selectable cost kernels for the final refinement pass (LM accept/
+# reject only; RANSAC model selection above always stays truncated MSAC via
+# the *_score functions, so their early per-chunk bail-out stays valid).
+# ---------------------------------------------------------------------------
+
+def build_sampson_cost(loss):
+    # generalizes sampson_score's truncated capped-quadratic into an
+    # arbitrary loss.cost(r2, max_error_sq); always divides (no need for the
+    # truncated fast path's skip-the-division trick since this is only used
+    # inside the LM loop, not the O(ransac_iterations x n) scorer)
+    cost_fn = loss.cost
+
+    @njit(cache=True, fastmath=True)
+    def _sampson_cost(f, data, max_error_sq, best_score):
+        x1_x, x1_y, x2_x, x2_y = data
+        n = x1_x.shape[0]
+        score = 0.0
+        num_inliers = 0
+        for i in range(n):
+            x = x1_x[i]
+            y = x1_y[i]
+            xp = x2_x[i]
+            yp = x2_y[i]
+            fx1_0 = f[0] * x + f[1] * y + f[2]
+            fx1_1 = f[3] * x + f[4] * y + f[5]
+            fx1_2 = f[6] * x + f[7] * y + f[8]
+            ftx2_0 = f[0] * xp + f[3] * yp + f[6]
+            ftx2_1 = f[1] * xp + f[4] * yp + f[7]
+            residual = xp * fx1_0 + yp * fx1_1 + fx1_2
+            denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
+                           + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
+            if denominator > 0.0:
+                r2 = residual * residual / denominator
+                score += cost_fn(r2, max_error_sq)
+                if r2 < max_error_sq:
+                    num_inliers += 1
+            else:
+                score += cost_fn(1e18, max_error_sq)
+        return score, num_inliers
+
+    return _sampson_cost
+
+
+def build_pose_sampson_cost(loss):
+    sampson_cost = build_sampson_cost(loss)
+
+    @njit(cache=True, fastmath=True)
+    def _pose_sampson_cost(model, data, max_error_sq, best_score):
+        e = np.empty(9)
+        essential_from_pose(model, e)
+        return sampson_cost(e, data, max_error_sq, best_score)
+
+    return _pose_sampson_cost
+
+
+def build_varying_focal_pose_sampson_cost(loss):
+    # shared by the shared-focal refiner too (same model layout, mirroring
+    # shared_focal_pose_sampson_score reusing varying_focal_pose_sampson_score)
+    sampson_cost = build_sampson_cost(loss)
+
+    @njit(cache=True, fastmath=True)
+    def _varying_focal_pose_sampson_cost(model, data, max_error_sq, best_score):
+        x1_x, x1_y, x2_x, x2_y, pp1x, pp1y, pp2x, pp2y = data
+        f = np.empty(9)
+        if not model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, f):
+            return 1e300, 0
+        return sampson_cost(f, (x1_x, x1_y, x2_x, x2_y), max_error_sq, best_score)
+
+    return _varying_focal_pose_sampson_cost

@@ -144,3 +144,86 @@ class FocalReprojectionScorer():
     def score_numpy(R, t, f, x, X, max_error):
         # f * pi(R X + t) - x is pi scaled: score in calibrated units
         return ReprojectionScorer.score_numpy(R, t, x / f, X, max_error / f)
+
+
+# ---------------------------------------------------------------------------
+# loss-selectable cost kernels for the final refinement pass (LM accept/
+# reject only; RANSAC model selection above always stays truncated MSAC via
+# the *_score functions, so their early per-chunk bail-out stays valid).
+# ---------------------------------------------------------------------------
+
+def build_reprojection_cost(loss):
+    # generalizes reprojection_score's truncated capped-quadratic into an
+    # arbitrary loss.cost(r2, max_error_sq); always divides by zz_sq (no
+    # need for the truncated fast path's skip-the-division trick since this
+    # is only used inside the LM loop, not the O(ransac_iterations x n) scorer)
+    cost_fn = loss.cost
+
+    @njit(cache=True, fastmath=True)
+    def _reprojection_cost(model, data, max_error_sq, best_score):
+        x_x, x_y, X_x, X_y, X_z = data
+        n = x_x.shape[0]
+        r00, r01, r02 = model[0], model[1], model[2]
+        r10, r11, r12 = model[3], model[4], model[5]
+        r20, r21, r22 = model[6], model[7], model[8]
+        t0, t1, t2 = model[9], model[10], model[11]
+
+        score = 0.0
+        num_inliers = 0
+        for i in range(n):
+            Xx = X_x[i]
+            Xy = X_y[i]
+            Xz = X_z[i]
+            zx = r00 * Xx + r01 * Xy + r02 * Xz + t0
+            zy = r10 * Xx + r11 * Xy + r12 * Xz + t1
+            zz = r20 * Xx + r21 * Xy + r22 * Xz + t2
+            if zz > 0.0:
+                dx = zx - x_x[i] * zz
+                dy = zy - x_y[i] * zz
+                r2 = (dx * dx + dy * dy) / (zz * zz)
+                score += cost_fn(r2, max_error_sq)
+                if r2 < max_error_sq:
+                    num_inliers += 1
+            else:
+                score += cost_fn(1e18, max_error_sq)
+        return score, num_inliers
+
+    return _reprojection_cost
+
+
+def build_focal_reprojection_cost(loss):
+    cost_fn = loss.cost
+
+    @njit(cache=True, fastmath=True)
+    def _focal_reprojection_cost(model, data, max_error_sq, best_score):
+        f = model[12]
+        if f <= 0.0:
+            return 1e300, 0
+        x_x, x_y, X_x, X_y, X_z = data
+        n = x_x.shape[0]
+        r00, r01, r02 = f * model[0], f * model[1], f * model[2]
+        r10, r11, r12 = f * model[3], f * model[4], f * model[5]
+        r20, r21, r22 = model[6], model[7], model[8]
+        t0, t1, t2 = f * model[9], f * model[10], model[11]
+
+        score = 0.0
+        num_inliers = 0
+        for i in range(n):
+            Xx = X_x[i]
+            Xy = X_y[i]
+            Xz = X_z[i]
+            zx = r00 * Xx + r01 * Xy + r02 * Xz + t0
+            zy = r10 * Xx + r11 * Xy + r12 * Xz + t1
+            zz = r20 * Xx + r21 * Xy + r22 * Xz + t2
+            if zz > 0.0:
+                dx = zx - x_x[i] * zz
+                dy = zy - x_y[i] * zz
+                r2 = (dx * dx + dy * dy) / (zz * zz)
+                score += cost_fn(r2, max_error_sq)
+                if r2 < max_error_sq:
+                    num_inliers += 1
+            else:
+                score += cost_fn(1e18, max_error_sq)
+        return score, num_inliers
+
+    return _focal_reprojection_cost

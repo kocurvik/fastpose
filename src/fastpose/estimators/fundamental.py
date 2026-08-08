@@ -9,6 +9,7 @@ import numpy as np
 from fastpose.estimators.ransac import RansacEstimator
 from fastpose.estimators.utils import normalize_points, point_columns
 from fastpose.refiners.fundamental import LMFundamentalRefiner
+from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.sampson import SampsonScorer
 from fastpose.solvers.fundamental import SevenPointSolver, seven_point
 
@@ -39,6 +40,7 @@ def estimate_fundamental_numpy(x1, x2, iterations=1000, max_error=2.0, seed=4578
 
 
 _default_estimator = None
+_final_refiner = None
 
 
 def _get_default_estimator():
@@ -47,6 +49,15 @@ def _get_default_estimator():
         _default_estimator = RansacEstimator(SevenPointSolver(), SampsonScorer(),
                                              LMFundamentalRefiner())
     return _default_estimator
+
+
+def _get_final_refiner():
+    # loss for the final polish pass on RANSAC inliers only; see
+    # refiners/losses.py for the available Loss objects
+    global _final_refiner
+    if _final_refiner is None:
+        _final_refiner = LMFundamentalRefiner(loss=CauchyLoss())
+    return _final_refiner
 
 
 def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
@@ -78,4 +89,19 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
 
     F = T.T @ model.reshape(3, 3) @ T
     _, inliers, num_inliers = SampsonScorer.score_numpy(F, x1, x2, max_error)
+
+    # final polish: robust-loss refinement restricted to the RANSAC inliers,
+    # done in the same normalized frame/threshold as the RANSAC pipeline
+    if lo_iterations != 0 and num_inliers > 0:
+        final_refiner = _get_final_refiner()
+        inlier_data = point_columns(x1n[inliers], x2n[inliers])
+        refined = np.empty(9)
+        if final_refiner.refine(inlier_data, model, refined,
+                                (max_error * scale) ** 2,
+                                final_refiner.num_iterations):
+            F_c = T.T @ refined.reshape(3, 3) @ T
+            _, inliers_c, num_inliers_c = SampsonScorer.score_numpy(
+                F_c, x1, x2, max_error)
+            F, inliers, num_inliers = F_c, inliers_c, num_inliers_c
+
     return F, num_inliers, inliers

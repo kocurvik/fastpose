@@ -4,11 +4,13 @@ import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
 from fastpose.estimators.utils import normalize_points
+from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.shared_focal import LMSharedFocalPoseRefiner
 from fastpose.scorers.sampson import SharedFocalPoseSampsonScorer
 from fastpose.solvers.shared_focal import SixPointSharedFocalSolver
 
 _default_estimator = None
+_final_refiner = None
 
 
 def _get_default_estimator():
@@ -20,6 +22,15 @@ def _get_default_estimator():
             LMSharedFocalPoseRefiner(),
         )
     return _default_estimator
+
+
+def _get_final_refiner():
+    # loss for the final polish pass on RANSAC inliers only; see
+    # refiners/losses.py for the available Loss objects
+    global _final_refiner
+    if _final_refiner is None:
+        _final_refiner = LMSharedFocalPoseRefiner(loss=CauchyLoss())
+    return _final_refiner
 
 
 def _principal_point(pp):
@@ -77,4 +88,21 @@ def estimate_relative_pose_with_shared_focal(
     f = float(model[12] / scale)
     _, inliers, num_inliers = SharedFocalPoseSampsonScorer.score_numpy(
         R, t, f, pp1, pp2, x1, x2, max_error)
+
+    # final polish: robust-loss refinement restricted to the RANSAC inliers,
+    # done in the same normalized frame/threshold as the RANSAC pipeline
+    if lo_iterations != 0 and num_inliers > 0:
+        final_refiner = _get_final_refiner()
+        inlier_data = _data_tuple(x1n[inliers], x2n[inliers], pp1n, pp2n)
+        refined = np.empty(13)
+        if final_refiner.refine(inlier_data, model, refined,
+                                (max_error * scale) ** 2,
+                                final_refiner.num_iterations):
+            R_c = refined[:9].reshape(3, 3).copy()
+            t_c = refined[9:12].copy()
+            f_c = float(refined[12] / scale)
+            _, inliers_c, num_inliers_c = SharedFocalPoseSampsonScorer.score_numpy(
+                R_c, t_c, f_c, pp1, pp2, x1, x2, max_error)
+            R, t, f, inliers, num_inliers = R_c, t_c, f_c, inliers_c, num_inliers_c
+
     return R, t, f, num_inliers, inliers

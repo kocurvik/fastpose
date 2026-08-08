@@ -11,10 +11,12 @@ import numpy as np
 from fastpose.estimators.ransac import RansacEstimator
 from fastpose.estimators.utils import point_columns
 from fastpose.refiners.essential import LMEssentialRefiner
+from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.sampson import PoseSampsonScorer
 from fastpose.solvers.essential import FivePointSolver
 
 _default_estimator = None
+_final_refiner = None
 
 
 def _get_default_estimator():
@@ -23,6 +25,15 @@ def _get_default_estimator():
         _default_estimator = RansacEstimator(FivePointSolver(), PoseSampsonScorer(),
                                              LMEssentialRefiner())
     return _default_estimator
+
+
+def _get_final_refiner():
+    # loss for the final polish pass on RANSAC inliers only; see
+    # refiners/losses.py for the available Loss objects
+    global _final_refiner
+    if _final_refiner is None:
+        _final_refiner = LMEssentialRefiner(loss=CauchyLoss())
+    return _final_refiner
 
 
 def estimate_relative_pose(x1, x2, iterations=1000, max_error=0.002,
@@ -50,6 +61,20 @@ def estimate_relative_pose(x1, x2, iterations=1000, max_error=0.002,
     R = model[:9].reshape(3, 3).copy()
     t = model[9:12].copy()
     _, inliers, num_inliers = PoseSampsonScorer.score_numpy(R, t, x1, x2, max_error)
+
+    # final polish: robust-loss refinement restricted to the RANSAC inliers
+    if lo_iterations != 0 and num_inliers > 0:
+        final_refiner = _get_final_refiner()
+        inlier_data = point_columns(x1[inliers], x2[inliers])
+        refined = np.empty(12)
+        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+                                final_refiner.num_iterations):
+            R_c = refined[:9].reshape(3, 3).copy()
+            t_c = refined[9:12].copy()
+            _, inliers_c, num_inliers_c = PoseSampsonScorer.score_numpy(
+                R_c, t_c, x1, x2, max_error)
+            R, t, inliers, num_inliers = R_c, t_c, inliers_c, num_inliers_c
+
     return R, t, num_inliers, inliers
 
 
