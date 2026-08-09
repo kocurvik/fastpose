@@ -9,7 +9,7 @@ benchmark).
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import point_columns
+from fastpose.estimators.utils import point_columns, unproject_pair
 from fastpose.refiners.essential import LMEssentialRefiner
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.sampson import PoseSampsonScorer
@@ -36,13 +36,19 @@ def _get_final_refiner():
     return _final_refiner
 
 
-def estimate_relative_pose(x1, x2, iterations=1000, max_error=0.002,
-                           seed=4578, min_iterations=None,
+def estimate_relative_pose(x1, x2, camera1=None, camera2=None, iterations=1000,
+                           max_error=0.002, seed=4578, min_iterations=None,
                            success_prob=0.9999, lo_iterations=25,
                            final_refinement_iterations=100):
     # params:
     # x1, x2 - (n, 2) arrays of corresponding *calibrated* (normalized) image
-    #          points; for pixel points apply (x - c) / f first
+    #          points; for pixel points apply (x - c) / f first, or pass
+    #          camera1/camera2 to have this done automatically
+    # camera1, camera2 - optional cameras (3x3 intrinsic matrix K, or a
+    #          poselib.Camera) used to unproject x1/x2 from pixel
+    #          coordinates into calibrated points; None (default) keeps x1,
+    #          x2 as already-calibrated input. When supplied, max_error is
+    #          also rescaled by the average focal length of the two cameras
     # max_error - Sampson threshold in the same normalized units
     #             (pixel threshold divided by focal length)
     # final_refinement_iterations - LM step budget for the final Cauchy-loss
@@ -51,6 +57,7 @@ def estimate_relative_pose(x1, x2, iterations=1000, max_error=0.002,
     # returns best_R, best_t (unit norm, x2 ~ R x1 + t), num_inliers, inliers
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
+    x1, x2, max_error = unproject_pair(camera1, camera2, x1, x2, max_error)
     data = point_columns(x1, x2)
 
     estimator = _get_default_estimator()

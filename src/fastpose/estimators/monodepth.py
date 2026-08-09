@@ -26,6 +26,7 @@ error, whose threshold `max_reproj_error` sets the relative weighting
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
+from fastpose.estimators.utils import unproject_pair
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.monodepth import (LMMonoDepthPoseRefiner,
                                 LMMonoDepthSharedFocalPoseRefiner,
@@ -112,14 +113,21 @@ def _principal_point(pp):
 
 
 def estimate_relative_pose_with_monodepth(
-        x1, x2, d1, d2, estimate_shift=False, iterations=1000, max_error=0.002,
-        max_reproj_error=0.016, weight_sampson=1.0, seed=4578,
-        min_iterations=None, success_prob=0.9999, lo_iterations=25,
+        x1, x2, d1, d2, camera1=None, camera2=None, estimate_shift=False,
+        iterations=1000, max_error=0.002, max_reproj_error=0.016,
+        weight_sampson=1.0, seed=4578, min_iterations=None,
+        success_prob=0.9999, lo_iterations=25,
         final_refinement_iterations=100):
     # params:
     # x1, x2 - (n, 2) arrays of *calibrated* image points
     # d1, d2 - (n,) monocular depths per image (scale-invariant, or
     #          affine-invariant with estimate_shift=True)
+    # camera1, camera2 - optional cameras (3x3 intrinsic matrix K, or a
+    #          poselib.Camera) used to unproject x1/x2 from pixel
+    #          coordinates into calibrated points; None (default) keeps x1,
+    #          x2 as already-calibrated input. When supplied, max_error and
+    #          max_reproj_error are also rescaled by the average focal
+    #          length of the two cameras
     # estimate_shift - also estimate one depth shift per image (the depths
     #          enter as d + shift)
     # max_error - truncated Sampson threshold in calibrated units
@@ -132,6 +140,8 @@ def estimate_relative_pose_with_monodepth(
     # returns R, t, scale, shift1, shift2, num_inliers, inliers with
     # scale * (d2 + shift2) * x2h = R ((d1 + shift1) * x1h) + t for inliers
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    x1, x2, max_error, max_reproj_error = unproject_pair(
+        camera1, camera2, x1, x2, max_error, max_reproj_error)
     data = _monodepth_data(x1, x2, d1, d2,
                            _scale_reproj(max_error, max_reproj_error),
                            weight_sampson)

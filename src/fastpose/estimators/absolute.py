@@ -4,6 +4,7 @@ al.), truncated reprojection scorer and direct pose LM refiner."""
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
+from fastpose.estimators.utils import camera_focal, unproject_points
 from fastpose.refiners.absolute import LMAbsolutePoseRefiner
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.reprojection import ReprojectionScorer
@@ -30,13 +31,19 @@ def _get_final_refiner():
     return _final_refiner
 
 
-def estimate_absolute_pose(x, X, iterations=1000, max_error=0.002, seed=4578,
-                           min_iterations=None, success_prob=0.9999,
+def estimate_absolute_pose(x, X, camera=None, iterations=1000, max_error=0.002,
+                           seed=4578, min_iterations=None, success_prob=0.9999,
                            lo_iterations=25, final_refinement_iterations=100):
     # params:
     # x - (n, 2) array of *calibrated* (normalized) image points; for pixel
-    #     points apply (x - c) / f first
+    #     points apply (x - c) / f first, or pass camera to have this done
+    #     automatically
     # X - (n, 3) array of corresponding 3D world points
+    # camera - optional camera (3x3 intrinsic matrix K, or a poselib.Camera)
+    #          used to unproject x from pixel coordinates into calibrated
+    #          points; None (default) keeps x as already-calibrated input.
+    #          When supplied, max_error is also rescaled by the camera's
+    #          focal length
     # iterations - maximum number of RANSAC iterations
     # max_error - truncated reprojection threshold in the same normalized
     #             units (pixel threshold / focal)
@@ -51,6 +58,9 @@ def estimate_absolute_pose(x, X, iterations=1000, max_error=0.002, seed=4578,
     # returns R, t, num_inliers, inliers with lambda * (x, y, 1) = R X + t
     x = np.ascontiguousarray(x, dtype=np.float64)
     X = np.ascontiguousarray(X, dtype=np.float64)
+    if camera is not None:
+        x = unproject_points(camera, x)
+        max_error = max_error / camera_focal(camera)
     data = (np.ascontiguousarray(x[:, 0]), np.ascontiguousarray(x[:, 1]),
             np.ascontiguousarray(X[:, 0]), np.ascontiguousarray(X[:, 1]),
             np.ascontiguousarray(X[:, 2]))

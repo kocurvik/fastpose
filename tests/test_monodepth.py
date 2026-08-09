@@ -207,6 +207,47 @@ def test_monodepth_estimator_handles_outliers_with_lo():
     assert abs(scale - SCALE_GT) / SCALE_GT < 0.05
 
 
+def test_monodepth_estimator_camera_matrix_recovers_exact_pose():
+    # calibrated=False, shared_focal=True with zero principal points gives a
+    # scene in pixel coordinates for a single shared square-pixel focal
+    # length, so the manual x/FOCAL calibration and the camera1/camera2 path
+    # should agree exactly
+    x1, x2, d1, d2, R_gt, t_gt, _, _ = make_scene(
+        30, calibrated=False, shared_focal=True)
+    K = np.array([[FOCAL, 0.0, 0.0], [0.0, FOCAL, 0.0], [0.0, 0.0, 1.0]])
+
+    R, t, scale, shift1, shift2, num_inliers, inliers = (
+        estimate_relative_pose_with_monodepth(
+            x1, x2, d1, d2, camera1=K, camera2=K, iterations=20,
+            min_iterations=20, max_error=0.001 * FOCAL, seed=0,
+            lo_iterations=0))
+
+    assert num_inliers == len(x1)
+    assert np.all(inliers)
+    assert rotation_error_deg(R, R_gt) < 1e-5
+    assert abs(scale - SCALE_GT) < 1e-6
+    assert np.abs(t - ALPHA1 * t_gt).max() < 1e-6
+
+
+def test_monodepth_estimator_poselib_camera_recovers_exact_pose():
+    poselib = pytest.importorskip('poselib')
+    x1, x2, d1, d2, R_gt, t_gt, _, _ = make_scene(
+        31, calibrated=False, shared_focal=True)
+    camera = poselib.Camera('PINHOLE', [FOCAL, FOCAL, 0.0, 0.0], 2000, 2000)
+
+    R, t, scale, shift1, shift2, num_inliers, inliers = (
+        estimate_relative_pose_with_monodepth(
+            x1, x2, d1, d2, camera1=camera, camera2=camera, iterations=20,
+            min_iterations=20, max_error=0.001 * FOCAL, seed=0,
+            lo_iterations=0))
+
+    assert num_inliers == len(x1)
+    assert np.all(inliers)
+    assert rotation_error_deg(R, R_gt) < 1e-5
+    assert abs(scale - SCALE_GT) < 1e-6
+    assert np.abs(t - ALPHA1 * t_gt).max() < 1e-6
+
+
 def test_monodepth_shift_estimator_handles_outliers_with_lo():
     x1, x2, d1, d2, R_gt, t_gt, u_gt, v_gt = make_scene(
         9, num_samples=500, noise_sigma=0.5 / FOCAL, outlier_ratio=0.3,

@@ -1,20 +1,32 @@
 import numpy as np
+import pytest
 
 from benchmarks.utils import generate_abspose_data, rotation_error_deg
 from fastpose.estimators.absolute import estimate_absolute_pose
 from fastpose.solvers.p3p import P3PSolver, _solve_p3p
 
+FOCAL = 1000.0
+IMAGE_SIZE = 2000.0
+PP = np.array([IMAGE_SIZE / 2.0, IMAGE_SIZE / 2.0])
+
 
 def make_abspose_scene(seed, num_samples=100, noise_sigma=0.0,
                        outlier_ratio=0.0):
     rng = np.random.default_rng(seed)
-    focal = 1000.0
-    image_size = 2000.0
     x, X, R, t = generate_abspose_data(
         rng, num_samples, noise_sigma=noise_sigma,
-        outlier_ratio=outlier_ratio, focal=focal, image_size=image_size)
-    xn = (x - image_size / 2.0) / focal
+        outlier_ratio=outlier_ratio, focal=FOCAL, image_size=IMAGE_SIZE)
+    xn = (x - PP) / FOCAL
     return xn, X, R, t
+
+
+def make_abspose_scene_pixels(seed, num_samples=100, noise_sigma=0.0,
+                              outlier_ratio=0.0):
+    rng = np.random.default_rng(seed)
+    x, X, R, t = generate_abspose_data(
+        rng, num_samples, noise_sigma=noise_sigma,
+        outlier_ratio=outlier_ratio, focal=FOCAL, image_size=IMAGE_SIZE)
+    return x, X, R, t
 
 
 def test_p3p_solver_recovers_exact_pose():
@@ -43,6 +55,36 @@ def test_absolute_estimator_recovers_exact_pose():
         seed=0, lo_iterations=0)
 
     assert num_inliers == len(xn)
+    assert np.all(inliers)
+    assert rotation_error_deg(R, R_gt) < 1e-4
+    assert np.linalg.norm(t - t_gt) < 1e-4
+
+
+def test_absolute_estimator_camera_matrix_recovers_exact_pose():
+    x, X, R_gt, t_gt = make_abspose_scene_pixels(1)
+    K = np.array([[FOCAL, 0.0, PP[0]], [0.0, FOCAL, PP[1]], [0.0, 0.0, 1.0]])
+
+    R, t, num_inliers, inliers = estimate_absolute_pose(
+        x, X, camera=K, iterations=30, min_iterations=30,
+        max_error=1e-3 * FOCAL, seed=0, lo_iterations=0)
+
+    assert num_inliers == len(x)
+    assert np.all(inliers)
+    assert rotation_error_deg(R, R_gt) < 1e-4
+    assert np.linalg.norm(t - t_gt) < 1e-4
+
+
+def test_absolute_estimator_poselib_camera_recovers_exact_pose():
+    poselib = pytest.importorskip('poselib')
+    x, X, R_gt, t_gt = make_abspose_scene_pixels(1)
+    camera = poselib.Camera('PINHOLE', [FOCAL, FOCAL, PP[0], PP[1]],
+                            int(IMAGE_SIZE), int(IMAGE_SIZE))
+
+    R, t, num_inliers, inliers = estimate_absolute_pose(
+        x, X, camera=camera, iterations=30, min_iterations=30,
+        max_error=1e-3 * FOCAL, seed=0, lo_iterations=0)
+
+    assert num_inliers == len(x)
     assert np.all(inliers)
     assert rotation_error_deg(R, R_gt) < 1e-4
     assert np.linalg.norm(t - t_gt) < 1e-4
