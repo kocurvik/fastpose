@@ -48,6 +48,14 @@ def _pose_error(R_est, t_est, R_gt, t_gt):
                translation_error_deg(t_est, t_gt))
 
 
+def _unpack(model, est_info):
+    # fastpose estimators now return (model, info) dicts; extract (R, t) or
+    # (None, None) on total failure, matching what _pose_error expects
+    if est_info['num_inliers'] == 0:
+        return None, None
+    return model['R'], model['t']
+
+
 def _generate_scenes(num_scenes, num_samples, mode, with_shift=False):
     scenes = []
     beta1 = 0.3 * ALPHA1 if with_shift else 0.0
@@ -115,15 +123,16 @@ def evaluate_maa(num_scenes=100, num_samples=5000,
             x1, x2, d1, d2, R_gt, t_gt = scenes[si]
             for method, lo in (('md-p3p', 0), ('md-p3p+LO', None)):
                 start = time.perf_counter()
-                R_est, t_est, scale, _, _, num_inliers, _ = (
-                    estimate_relative_pose_with_monodepth(
-                        x1, x2, d1, d2, iterations=iters,
-                        max_error=max_error, max_reproj_error=max_reproj,
-                        lo_iterations=lo, seed=si))
+                model, est_info = estimate_relative_pose_with_monodepth(
+                    x1, x2, d1, d2, iterations=iters,
+                    max_error=max_error, max_reproj_error=max_reproj,
+                    lo_iterations=lo, seed=si)
                 times[method].append(time.perf_counter() - start)
+                R_est, t_est = _unpack(model, est_info)
                 errors[method].append(_pose_error(R_est, t_est, R_gt, t_gt))
-                if method == 'md-p3p+LO' and scale is not None:
-                    scale_errs.append(abs(scale - ALPHA1 / ALPHA2) * ALPHA2 / ALPHA1)
+                if method == 'md-p3p+LO' and est_info['num_inliers'] > 0:
+                    scale_errs.append(
+                        abs(model['scale'] - ALPHA1 / ALPHA2) * ALPHA2 / ALPHA1)
 
             opt = _poselib_ransac_opt(iters, [max_reproj, max_error])
             start = time.perf_counter()
@@ -136,12 +145,12 @@ def evaluate_maa(num_scenes=100, num_samples=5000,
             # shift variants on the affine-depth scenes
             x1, x2, d1, d2, R_gt, t_gt = shift_scenes[si]
             start = time.perf_counter()
-            R_est, t_est, scale, _, _, num_inliers, _ = (
-                estimate_relative_pose_with_monodepth(
-                    x1, x2, d1, d2, estimate_shift=True, iterations=iters,
-                    max_error=max_error, max_reproj_error=max_reproj,
-                    seed=si))
+            model, est_info = estimate_relative_pose_with_monodepth(
+                x1, x2, d1, d2, estimate_shift=True, iterations=iters,
+                max_error=max_error, max_reproj_error=max_reproj,
+                seed=si)
             times['md-shift+LO'].append(time.perf_counter() - start)
+            R_est, t_est = _unpack(model, est_info)
             errors['md-shift+LO'].append(_pose_error(R_est, t_est, R_gt, t_gt))
 
             opt = _poselib_ransac_opt(iters, [max_reproj, max_error],
@@ -209,20 +218,20 @@ def evaluate_focal_maa(shared, num_scenes=100, num_samples=5000,
             x1, x2, d1, d2, R_gt, t_gt = scenes[si]
             for method, lo in ((short, 0), (short + '+LO', None)):
                 start = time.perf_counter()
-                out = estimate(x1, x2, d1, d2, iterations=iters,
-                               max_error=MAX_ERROR,
-                               max_reproj_error=MAX_REPROJ_ERROR,
-                               lo_iterations=lo, seed=si)
+                model, est_info = estimate(x1, x2, d1, d2, iterations=iters,
+                                           max_error=MAX_ERROR,
+                                           max_reproj_error=MAX_REPROJ_ERROR,
+                                           lo_iterations=lo, seed=si)
                 times[method].append(time.perf_counter() - start)
-                R_est, t_est = out[0], out[1]
+                R_est, t_est = _unpack(model, est_info)
                 errors[method].append(_pose_error(R_est, t_est, R_gt, t_gt))
-                if method.endswith('+LO') and R_est is not None:
+                if method.endswith('+LO') and est_info['num_inliers'] > 0:
                     if shared:
-                        focal_errs.append(abs(out[2] - FOCAL) / FOCAL)
+                        focal_errs.append(abs(model['f'] - FOCAL) / FOCAL)
                     else:
                         focal_errs.append(max(
-                            abs(out[2] - FOCAL1) / FOCAL1,
-                            abs(out[3] - FOCAL2) / FOCAL2))
+                            abs(model['f1'] - FOCAL1) / FOCAL1,
+                            abs(model['f2'] - FOCAL2) / FOCAL2))
 
             opt = _poselib_ransac_opt(iters, [MAX_REPROJ_ERROR, MAX_ERROR])
             start = time.perf_counter()
@@ -294,8 +303,9 @@ def run_scaling_benchmark():
                 start = time.perf_counter()
                 out = run(x1, x2, d1, d2, iterations, 0)
                 times.append(time.perf_counter() - start)
-            R_est, t_est = out[0], out[1]
-            num_inliers = out[-2]
+            model, est_info = out
+            R_est, t_est = _unpack(model, est_info)
+            num_inliers = est_info['num_inliers']
             err = _pose_error(R_est, t_est, R_gt, t_gt)
             print(f'{label:13s} {min(times):.4f}s, '
                   f'inliers={num_inliers}/{num_samples}, '

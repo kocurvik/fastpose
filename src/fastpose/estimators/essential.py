@@ -9,7 +9,8 @@ benchmark).
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import point_columns, unproject_pair
+from fastpose.estimators.utils import (build_info, failure_info, point_columns,
+                                       unproject_pair)
 from fastpose.refiners.essential import LMEssentialRefiner
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.sampson import PoseSampsonScorer
@@ -54,42 +55,50 @@ def estimate_relative_pose(x1, x2, camera1=None, camera2=None, iterations=1000,
     # final_refinement_iterations - LM step budget for the final Cauchy-loss
     #                 polish pass on the RANSAC inliers; independent of
     #                 lo_iterations. Defaults to 100; 0 disables the pass
-    # returns best_R, best_t (unit norm, x2 ~ R x1 + t), num_inliers, inliers
+    # returns (model, info) with model = {'R', 't'} (unit norm t,
+    # x2 ~ R x1 + t) and info = {'inliers', 'num_inliers', 'model_score',
+    # 'iterations', 'refinements'}; on total failure model holds the
+    # identity pose and info['num_inliers'] is 0
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
     x1, x2, max_error = unproject_pair(camera1, camera2, x1, x2, max_error)
     data = point_columns(x1, x2)
 
     estimator = _get_default_estimator()
-    model, score, num_inliers, _ = estimator.estimate(
+    model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
         lo_iterations=lo_iterations, seed=seed)
 
     if num_inliers == 0:
-        return None, None, 0, None
+        return ({'R': np.eye(3), 't': np.zeros(3)},
+                failure_info(len(x1), ransac_iterations))
 
     R = model[:9].reshape(3, 3).copy()
     t = model[9:12].copy()
-    _, inliers, num_inliers = PoseSampsonScorer.score_numpy(R, t, x1, x2, max_error)
+    score, inliers, num_inliers = PoseSampsonScorer.score_numpy(R, t, x1, x2, max_error)
+    refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
     if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner()
         inlier_data = point_columns(x1[inliers], x2[inliers])
-        refined = np.empty(12)
+        refined_model = np.empty(12)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
                                 num_final_iterations):
-            R_c = refined[:9].reshape(3, 3).copy()
-            t_c = refined[9:12].copy()
-            _, inliers_c, num_inliers_c = PoseSampsonScorer.score_numpy(
+            R_c = refined_model[:9].reshape(3, 3).copy()
+            t_c = refined_model[9:12].copy()
+            score_c, inliers_c, num_inliers_c = PoseSampsonScorer.score_numpy(
                 R_c, t_c, x1, x2, max_error)
-            R, t, inliers, num_inliers = R_c, t_c, inliers_c, num_inliers_c
+            R, t, inliers, num_inliers, score = (R_c, t_c, inliers_c,
+                                                 num_inliers_c, score_c)
+            refined = True
 
-    return R, t, num_inliers, inliers
+    return ({'R': R, 't': t},
+            build_info(inliers, num_inliers, score, ransac_iterations, refined))
 
 
 def motion_from_essential(E, x1, x2, max_points=100):

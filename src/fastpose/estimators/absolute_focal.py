@@ -5,6 +5,7 @@ direct pose + log-focal LM refiner."""
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
+from fastpose.estimators.utils import build_info, failure_info
 from fastpose.refiners.absolute_focal import LMAbsolutePoseFocalRefiner
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.reprojection import FocalReprojectionScorer
@@ -46,8 +47,11 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
     # final_refinement_iterations - LM step budget for the final Cauchy-loss
     #                 polish pass on the RANSAC inliers; independent of
     #                 lo_iterations. Defaults to 100; 0 disables the pass
-    # returns R, t, f, num_inliers, inliers with
-    # lambda * (x, y, 1) = diag(f, f, 1) (R X + t)
+    # returns (model, info) with model = {'R', 't', 'f'}
+    # (lambda * (x, y, 1) = diag(f, f, 1) (R X + t)) and info = {'inliers',
+    # 'num_inliers', 'model_score', 'iterations', 'refinements'}; on total
+    # failure model holds the identity pose with f=1.0 and
+    # info['num_inliers'] is 0
     x = np.ascontiguousarray(x, dtype=np.float64)
     X = np.ascontiguousarray(X, dtype=np.float64)
     if principal_point is not None:
@@ -60,19 +64,21 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
             np.ascontiguousarray(X[:, 2]))
 
     estimator = _get_default_estimator()
-    model, score, num_inliers, _ = estimator.estimate(
+    model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x), max_error, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
         lo_iterations=lo_iterations, seed=seed)
 
     if num_inliers == 0:
-        return None, None, None, 0, None
+        return ({'R': np.eye(3), 't': np.zeros(3), 'f': 1.0},
+                failure_info(len(x), ransac_iterations))
 
     R = model[:9].reshape(3, 3).copy()
     t = model[9:12].copy()
     f = float(model[12])
-    _, inliers, num_inliers = FocalReprojectionScorer.score_numpy(
+    score, inliers, num_inliers = FocalReprojectionScorer.score_numpy(
         R, t, f, x, X, max_error)
+    refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
     if final_refinement_iterations != 0 and num_inliers > 0:
@@ -82,17 +88,20 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
                        np.ascontiguousarray(X[inliers, 0]),
                        np.ascontiguousarray(X[inliers, 1]),
                        np.ascontiguousarray(X[inliers, 2]))
-        refined = np.empty(13)
+        refined_model = np.empty(13)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
                                 num_final_iterations):
-            R_c = refined[:9].reshape(3, 3).copy()
-            t_c = refined[9:12].copy()
-            f_c = float(refined[12])
-            _, inliers_c, num_inliers_c = FocalReprojectionScorer.score_numpy(
+            R_c = refined_model[:9].reshape(3, 3).copy()
+            t_c = refined_model[9:12].copy()
+            f_c = float(refined_model[12])
+            score_c, inliers_c, num_inliers_c = FocalReprojectionScorer.score_numpy(
                 R_c, t_c, f_c, x, X, max_error)
-            R, t, f, inliers, num_inliers = R_c, t_c, f_c, inliers_c, num_inliers_c
+            R, t, f, inliers, num_inliers, score = (R_c, t_c, f_c, inliers_c,
+                                                     num_inliers_c, score_c)
+            refined = True
 
-    return R, t, f, num_inliers, inliers
+    return ({'R': R, 't': t, 'f': f},
+            build_info(inliers, num_inliers, score, ransac_iterations, refined))

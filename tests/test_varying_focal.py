@@ -43,16 +43,16 @@ def test_bougnoux_recovers_focals_from_exact_fundamental():
 def test_varying_focal_estimator_recovers_exact_pose_and_focals():
     x1, x2, R_gt, t_gt, f1_gt, f2_gt, pp1, pp2 = make_varying_focal_scene(1)
 
-    R, t, f1, f2, num_inliers, inliers = estimate_relative_pose_with_varying_focals(
+    model, info = estimate_relative_pose_with_varying_focals(
         x1, x2, pp1, pp2, iterations=30, min_iterations=30,
         max_error=1.0, seed=0, lo_iterations=0)
 
-    assert num_inliers == len(x1)
-    assert np.all(inliers)
-    assert abs(f1 - f1_gt) < 1e-5
-    assert abs(f2 - f2_gt) < 1e-5
-    assert rotation_error_deg(R, R_gt) < 1e-5
-    assert translation_error_deg(t, t_gt) < 1e-5
+    assert info['num_inliers'] == len(x1)
+    assert np.all(info['inliers'])
+    assert abs(model['f1'] - f1_gt) < 1e-5
+    assert abs(model['f2'] - f2_gt) < 1e-5
+    assert rotation_error_deg(model['R'], R_gt) < 1e-5
+    assert translation_error_deg(model['t'], t_gt) < 1e-5
 
 
 def test_varying_focal_estimator_handles_default_zero_principal_points():
@@ -60,29 +60,28 @@ def test_varying_focal_estimator_handles_default_zero_principal_points():
     x1 = x1 - pp1
     x2 = x2 - pp2
 
-    R, t, f1, f2, num_inliers, inliers = estimate_relative_pose_with_varying_focals(
+    model, info = estimate_relative_pose_with_varying_focals(
         x1, x2, iterations=30, min_iterations=30, max_error=1.0,
         seed=0, lo_iterations=0)
 
-    assert num_inliers == len(x1)
-    assert abs(f1 - f1_gt) < 1e-5
-    assert abs(f2 - f2_gt) < 1e-5
-    assert rotation_error_deg(R, R_gt) < 1e-5
-    assert translation_error_deg(t, t_gt) < 1e-5
+    assert info['num_inliers'] == len(x1)
+    assert abs(model['f1'] - f1_gt) < 1e-5
+    assert abs(model['f2'] - f2_gt) < 1e-5
+    assert rotation_error_deg(model['R'], R_gt) < 1e-5
+    assert translation_error_deg(model['t'], t_gt) < 1e-5
 
 
 def test_varying_focal_estimator_runs_local_optimization():
     x1, x2, R_gt, t_gt, f1_gt, f2_gt, pp1, pp2 = make_varying_focal_scene(3)
 
-    R, t, f1, f2, num_inliers, inliers = estimate_relative_pose_with_varying_focals(
+    model, info = estimate_relative_pose_with_varying_focals(
         x1, x2, pp1, pp2, iterations=30, min_iterations=30,
         max_error=1.0, seed=2, lo_iterations=2)
 
-    assert R is not None
-    assert num_inliers > 50
-    assert f1 > 0.0
-    assert f2 > 0.0
-    assert abs(f1 - f1_gt) < 1e-5
-    assert abs(f2 - f2_gt) < 1e-5
-    assert rotation_error_deg(R, R_gt) < 1e-5
-    assert translation_error_deg(t, t_gt) < 1e-5
+    assert info['num_inliers'] > 50
+    assert model['f1'] > 0.0
+    assert model['f2'] > 0.0
+    assert abs(model['f1'] - f1_gt) < 1e-5
+    assert abs(model['f2'] - f2_gt) < 1e-5
+    assert rotation_error_deg(model['R'], R_gt) < 1e-5
+    assert translation_error_deg(model['t'], t_gt) < 1e-5

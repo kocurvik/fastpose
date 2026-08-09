@@ -318,23 +318,34 @@ import numpy as np
 from fastpose.estimators import estimate_relative_pose, estimate_fundamental, estimate_absolute_pose
 
 # calibrated relative pose (5-point): x1, x2 are normalized (x - c) / f
-R, t, num_inliers, inliers = estimate_relative_pose(
+model, info = estimate_relative_pose(
     x1, x2, iterations=1000, max_error=2.0 / focal, lo_iterations=None)
+R, t = model['R'], model['t']
 
 # fundamental matrix (7-point): x1, x2 are pixel coordinates
-F, num_inliers, inliers = estimate_fundamental(
+model, info = estimate_fundamental(
     x1, x2, iterations=1000, max_error=2.0)
+F = model['F']
 
 # absolute pose (P3P): x is normalized image points, X the 3D points
-R, t, num_inliers, inliers = estimate_absolute_pose(
+model, info = estimate_absolute_pose(
     x, X, iterations=1000, max_error=2.0 / focal)
+R, t = model['R'], model['t']
 ```
 
 Every `estimate_*` function follows the same pattern: it takes the
 correspondence arrays plus RANSAC options (`iterations`, `max_error`,
 `min_iterations` for adaptive termination, `lo_iterations` for the local
-optimization budget, `seed`) and returns the best model, inlier count and
-inlier mask. See the per-backend sections above for the full list
+optimization budget, `seed`) and returns `(model, info)`. `model` is a dict
+holding the estimated quantities (`R`/`t` for pose problems, plus `f`/`f1`,
+`f2` for the unknown-focal variants and `scale`/`shift1`/`shift2` for the
+monodepth ones, or `F` for the fundamental matrix); on total failure
+(`info['num_inliers'] == 0`) `model` holds a generic identity pose
+(`R = eye(3)`, `t = 0`, focals `= 1.0`) instead of a fit result. `info` is a
+dict with `inliers` (boolean mask), `num_inliers`, `model_score` (the
+scorer's truncated score), `iterations` (RANSAC samples drawn) and
+`refinements` (whether the post-RANSAC polish pass ran and was adopted). See
+the per-backend sections above for the full list
 (`estimate_relative_pose_with_varying_focals`,
 `estimate_relative_pose_with_shared_focal`,
 `estimate_absolute_pose_with_focal`,

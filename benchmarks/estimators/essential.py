@@ -17,10 +17,11 @@ from benchmarks.utils import (generate_relpose_data, pose_maa,
 from fastpose.estimators.essential import estimate_relative_pose
 
 
-def _pose_error(R_est, t_est, R_gt, t_gt):
-    if R_est is None:
+def _pose_error(model, est_info, R_gt, t_gt):
+    if est_info['num_inliers'] == 0:
         return 180.0
-    return max(rotation_error_deg(R_est, R_gt), translation_error_deg(t_est, t_gt))
+    return max(rotation_error_deg(model['R'], R_gt),
+               translation_error_deg(model['t'], t_gt))
 
 
 def evaluate_maa(num_scenes=100, num_samples=5000, noise_sigma=4.0,
@@ -56,10 +57,10 @@ def evaluate_maa(num_scenes=100, num_samples=5000, noise_sigma=4.0,
         for si, (x1, x2, x1n, x2n, R_gt, t_gt) in enumerate(scenes):
             for method, lo in (('numba', 0), ('numba+LO', None)):
                 start = time.perf_counter()
-                R_est, t_est, num_inliers, inliers = estimate_relative_pose(
+                model, est_info = estimate_relative_pose(
                     x1n, x2n, iterations=iters, max_error=max_error / focal,
                     lo_iterations=lo, seed=si)
-                err = _pose_error(R_est, t_est, R_gt, t_gt)
+                err = _pose_error(model, est_info, R_gt, t_gt)
                 times[method].append(time.perf_counter() - start)
                 errors[method].append(err)
 
@@ -127,12 +128,13 @@ def run_scaling_benchmark():
             times = []
             for _ in range(repeats):
                 start = time.perf_counter()
-                R_est, t_est, num_inliers, inliers = estimate_relative_pose(
+                model, est_info = estimate_relative_pose(
                     x1n, x2n, iterations=iterations, max_error=max_error / focal,
                     lo_iterations=lo)
                 times.append(time.perf_counter() - start)
-            rot_err = rotation_error_deg(R_est, R_gt)
-            print(f'{label:11s} {min(times):.4f}s, inliers={num_inliers}/{num_samples}, '
+            rot_err = rotation_error_deg(model['R'], R_gt)
+            print(f'{label:11s} {min(times):.4f}s, '
+                  f'inliers={est_info["num_inliers"]}/{num_samples}, '
                   f'rot err={rot_err:.3f} deg')
 
         times = []

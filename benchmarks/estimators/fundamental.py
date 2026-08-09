@@ -75,12 +75,12 @@ def evaluate_maa(num_scenes=100, num_samples=5000, noise_sigma=3.0,
         for si, (x1, x2, x1n, x2n, R_gt, t_gt) in enumerate(scenes):
             for method, lo in (('numba', 0), ('numba+LO', None)):
                 start = time.perf_counter()
-                F, num_inliers, inliers = estimate_fundamental(
+                model, est_info = estimate_fundamental(
                     x1, x2, iterations=iters, max_error=max_error,
                     lo_iterations=lo, seed=si)
                 times[method].append(time.perf_counter() - start)
-                errors[method].append(_pose_error_from_f(F, inliers, x1n, x2n,
-                                                         K, R_gt, t_gt))
+                errors[method].append(_pose_error_from_f(
+                    model['F'], est_info['inliers'], x1n, x2n, K, R_gt, t_gt))
 
             # poselib 3.0 expects RANSAC options nested under 'ransac'
             # (a flat dict is silently ignored)
@@ -138,18 +138,18 @@ def run_scaling_benchmark():
         times = []
         for _ in range(repeats):
             start = time.perf_counter()
-            F, num_inliers, inliers = estimate_fundamental(
+            model, est_info = estimate_fundamental(
                 x1, x2, iterations=iterations, max_error=max_error, lo_iterations=0)
             times.append(time.perf_counter() - start)
-        print(f'numba:      {min(times):.4f}s, inliers={num_inliers}/{num_samples}')
+        print(f'numba:      {min(times):.4f}s, inliers={est_info["num_inliers"]}/{num_samples}')
 
         times = []
         for _ in range(repeats):
             start = time.perf_counter()
-            F, num_inliers, inliers = estimate_fundamental(
+            model, est_info = estimate_fundamental(
                 x1, x2, iterations=iterations, max_error=max_error)
             times.append(time.perf_counter() - start)
-        print(f'numba+LO:   {min(times):.4f}s, inliers={num_inliers}/{num_samples}')
+        print(f'numba+LO:   {min(times):.4f}s, inliers={est_info["num_inliers"]}/{num_samples}')
 
         times = []
         for _ in range(repeats):
@@ -195,25 +195,25 @@ def evaluate_varying_focal_maa(num_scenes=100, num_samples=5000,
         times = {m: [] for m in methods}
         for si, (x1, x2, R_gt, t_gt, pp1, pp2, K1, K2) in enumerate(scenes):
             start = time.perf_counter()
-            F, num_inliers, inliers = estimate_fundamental(
+            model, est_info = estimate_fundamental(
                 x1, x2, iterations=iters, max_error=max_error,
                 lo_iterations=None, seed=si)
             times['fundamental+gtK'].append(time.perf_counter() - start)
             errors['fundamental+gtK'].append(
-                _pose_error_from_f_two_k(F, inliers, x1, x2, K1, K2, R_gt, t_gt))
+                _pose_error_from_f_two_k(model['F'], est_info['inliers'],
+                                         x1, x2, K1, K2, R_gt, t_gt))
 
             for method, lo in (('varying-f', 0), ('varying-f+LO', None)):
                 start = time.perf_counter()
-                R_est, t_est, f1, f2, num_inliers, inliers = (
-                    estimate_relative_pose_with_varying_focals(
-                        x1, x2, pp1, pp2, iterations=iters,
-                        max_error=max_error, lo_iterations=lo, seed=si))
+                model, est_info = estimate_relative_pose_with_varying_focals(
+                    x1, x2, pp1, pp2, iterations=iters,
+                    max_error=max_error, lo_iterations=lo, seed=si)
                 times[method].append(time.perf_counter() - start)
-                if R_est is None:
+                if est_info['num_inliers'] == 0:
                     errors[method].append(180.0)
                 else:
-                    errors[method].append(max(rotation_error_deg(R_est, R_gt),
-                                              translation_error_deg(t_est, t_gt)))
+                    errors[method].append(max(rotation_error_deg(model['R'], R_gt),
+                                              translation_error_deg(model['t'], t_gt)))
 
         print(f'--- {iters} iterations ---')
         for m in methods:
@@ -269,27 +269,27 @@ def evaluate_shared_focal_maa(num_scenes=100, num_samples=5000,
         poselib_focal_errs = []
         for si, (x1, x2, x1c, x2c, R_gt, t_gt, pp1, pp2, K1, K2) in enumerate(scenes):
             start = time.perf_counter()
-            F, num_inliers, inliers = estimate_fundamental(
+            model, est_info = estimate_fundamental(
                 x1, x2, iterations=iters, max_error=max_error,
                 lo_iterations=None, seed=si)
             times['fundamental+gtK'].append(time.perf_counter() - start)
             errors['fundamental+gtK'].append(
-                _pose_error_from_f_two_k(F, inliers, x1, x2, K1, K2, R_gt, t_gt))
+                _pose_error_from_f_two_k(model['F'], est_info['inliers'],
+                                         x1, x2, K1, K2, R_gt, t_gt))
 
             for method, lo in (('shared-f', 0), ('shared-f+LO', None)):
                 start = time.perf_counter()
-                R_est, t_est, f_est, num_inliers, inliers = (
-                    estimate_relative_pose_with_shared_focal(
-                        x1, x2, pp1, pp2, iterations=iters,
-                        max_error=max_error, lo_iterations=lo, seed=si))
+                model, est_info = estimate_relative_pose_with_shared_focal(
+                    x1, x2, pp1, pp2, iterations=iters,
+                    max_error=max_error, lo_iterations=lo, seed=si)
                 times[method].append(time.perf_counter() - start)
-                if R_est is None:
+                if est_info['num_inliers'] == 0:
                     errors[method].append(180.0)
                 else:
-                    errors[method].append(max(rotation_error_deg(R_est, R_gt),
-                                              translation_error_deg(t_est, t_gt)))
+                    errors[method].append(max(rotation_error_deg(model['R'], R_gt),
+                                              translation_error_deg(model['t'], t_gt)))
                     if method == 'shared-f+LO':
-                        focal_errs.append(abs(f_est - focal) / focal)
+                        focal_errs.append(abs(model['f'] - focal) / focal)
 
             # poselib's shared-focal binding accepts a single principal point,
             # so compare in principal-point-centered coordinates with pp = 0.

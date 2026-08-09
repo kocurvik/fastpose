@@ -26,7 +26,7 @@ error, whose threshold `max_reproj_error` sets the relative weighting
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import unproject_pair
+from fastpose.estimators.utils import build_info, failure_info, unproject_pair
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.monodepth import (LMMonoDepthPoseRefiner,
                                 LMMonoDepthSharedFocalPoseRefiner,
@@ -137,8 +137,12 @@ def estimate_relative_pose_with_monodepth(
     # final_refinement_iterations - LM step budget for the final Cauchy-loss
     #          polish pass on the RANSAC inliers; independent of
     #          lo_iterations. Defaults to 100; 0 disables the pass
-    # returns R, t, scale, shift1, shift2, num_inliers, inliers with
-    # scale * (d2 + shift2) * x2h = R ((d1 + shift1) * x1h) + t for inliers
+    # returns (model, info) with model = {'R', 't', 'scale', 'shift1',
+    # 'shift2'} (scale * (d2 + shift2) * x2h = R ((d1 + shift1) * x1h) + t
+    # for inliers) and info = {'inliers', 'num_inliers', 'model_score',
+    # 'iterations', 'refinements'}; on total failure model holds the
+    # identity pose with scale=1.0, shift1=shift2=0.0 and
+    # info['num_inliers'] is 0
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
     x1, x2, max_error, max_reproj_error = unproject_pair(
         camera1, camera2, x1, x2, max_error, max_reproj_error)
@@ -148,21 +152,24 @@ def estimate_relative_pose_with_monodepth(
 
     kind = 'calibrated-shift' if estimate_shift else 'calibrated'
     estimator = _get_estimator(kind)
-    model, score, num_inliers, _ = estimator.estimate(
+    model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
         lo_iterations=lo_iterations, seed=seed)
 
     if num_inliers == 0:
-        return None, None, None, None, None, 0, None
+        return ({'R': np.eye(3), 't': np.zeros(3), 'scale': 1.0,
+                'shift1': 0.0, 'shift2': 0.0},
+                failure_info(len(x1), ransac_iterations))
 
     R = model[:9].reshape(3, 3).copy()
     t = model[9:12].copy()
     scale = float(model[12])
     shift1 = float(model[13])
     shift2 = float(model[14])
-    _, inliers, num_inliers = MonoDepthPoseSampsonScorer.score_numpy(
+    score, inliers, num_inliers = MonoDepthPoseSampsonScorer.score_numpy(
         R, t, x1, x2, max_error)
+    refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
     if final_refinement_iterations != 0 and num_inliers > 0:
@@ -170,23 +177,26 @@ def estimate_relative_pose_with_monodepth(
         inlier_data = _monodepth_data(
             x1[inliers], x2[inliers], d1[inliers], d2[inliers],
             _scale_reproj(max_error, max_reproj_error), weight_sampson)
-        refined = np.empty(15)
+        refined_model = np.empty(15)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
                                 num_final_iterations):
-            R_c = refined[:9].reshape(3, 3).copy()
-            t_c = refined[9:12].copy()
-            scale_c = float(refined[12])
-            shift1_c = float(refined[13])
-            shift2_c = float(refined[14])
-            _, inliers_c, num_inliers_c = MonoDepthPoseSampsonScorer.score_numpy(
+            R_c = refined_model[:9].reshape(3, 3).copy()
+            t_c = refined_model[9:12].copy()
+            scale_c = float(refined_model[12])
+            shift1_c = float(refined_model[13])
+            shift2_c = float(refined_model[14])
+            score_c, inliers_c, num_inliers_c = MonoDepthPoseSampsonScorer.score_numpy(
                 R_c, t_c, x1, x2, max_error)
-            R, t, scale, shift1, shift2 = R_c, t_c, scale_c, shift1_c, shift2_c
+            R, t, scale, shift1, shift2, score = (R_c, t_c, scale_c, shift1_c,
+                                                   shift2_c, score_c)
             inliers, num_inliers = inliers_c, num_inliers_c
+            refined = True
 
-    return R, t, scale, shift1, shift2, num_inliers, inliers
+    return ({'R': R, 't': t, 'scale': scale, 'shift1': shift1, 'shift2': shift2},
+            build_info(inliers, num_inliers, score, ransac_iterations, refined))
 
 
 def estimate_shared_focal_relative_pose_with_monodepth(
@@ -200,8 +210,10 @@ def estimate_shared_focal_relative_pose_with_monodepth(
     # omitted. Thresholds in pixels. final_refinement_iterations is the LM
     # step budget for the final Cauchy-loss polish pass on the RANSAC
     # inliers, independent of lo_iterations; defaults to 100, 0 disables the
-    # pass. Returns
-    # R, t, f, scale, num_inliers, inliers.
+    # pass. Returns (model, info) with model = {'R', 't', 'f', 'scale'} and
+    # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
+    # 'refinements'}; on total failure model holds the identity pose with
+    # f=scale=1.0 and info['num_inliers'] is 0.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
     x1c = x1 - _principal_point(principal_point1)
     x2c = x2 - _principal_point(principal_point2)
@@ -210,20 +222,22 @@ def estimate_shared_focal_relative_pose_with_monodepth(
                            weight_sampson)
 
     estimator = _get_estimator('shared-focal')
-    model, score, num_inliers, _ = estimator.estimate(
+    model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
         lo_iterations=lo_iterations, seed=seed)
 
     if num_inliers == 0:
-        return None, None, None, None, 0, None
+        return ({'R': np.eye(3), 't': np.zeros(3), 'f': 1.0, 'scale': 1.0},
+                failure_info(len(x1), ransac_iterations))
 
     R = model[:9].reshape(3, 3).copy()
     t = model[9:12].copy()
     f = float(model[12])
     scale = float(model[14])
-    _, inliers, num_inliers = MonoDepthFocalPoseSampsonScorer.score_numpy(
+    score, inliers, num_inliers = MonoDepthFocalPoseSampsonScorer.score_numpy(
         R, t, f, f, x1c, x2c, max_error)
+    refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
     if final_refinement_iterations != 0 and num_inliers > 0:
@@ -231,22 +245,24 @@ def estimate_shared_focal_relative_pose_with_monodepth(
         inlier_data = _monodepth_data(
             x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
             _scale_reproj(max_error, max_reproj_error), weight_sampson)
-        refined = np.empty(15)
+        refined_model = np.empty(15)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
                                 num_final_iterations):
-            R_c = refined[:9].reshape(3, 3).copy()
-            t_c = refined[9:12].copy()
-            f_c = float(refined[12])
-            scale_c = float(refined[14])
-            _, inliers_c, num_inliers_c = MonoDepthFocalPoseSampsonScorer.score_numpy(
+            R_c = refined_model[:9].reshape(3, 3).copy()
+            t_c = refined_model[9:12].copy()
+            f_c = float(refined_model[12])
+            scale_c = float(refined_model[14])
+            score_c, inliers_c, num_inliers_c = MonoDepthFocalPoseSampsonScorer.score_numpy(
                 R_c, t_c, f_c, f_c, x1c, x2c, max_error)
-            R, t, f, scale = R_c, t_c, f_c, scale_c
+            R, t, f, scale, score = R_c, t_c, f_c, scale_c, score_c
             inliers, num_inliers = inliers_c, num_inliers_c
+            refined = True
 
-    return R, t, f, scale, num_inliers, inliers
+    return ({'R': R, 't': t, 'f': f, 'scale': scale},
+            build_info(inliers, num_inliers, score, ransac_iterations, refined))
 
 
 def estimate_varying_focal_relative_pose_with_monodepth(
@@ -260,7 +276,10 @@ def estimate_varying_focal_relative_pose_with_monodepth(
     # Thresholds in pixels. final_refinement_iterations is the LM step
     # budget for the final Cauchy-loss polish pass on the RANSAC inliers,
     # independent of lo_iterations; defaults to 100, 0 disables the pass.
-    # Returns R, t, f1, f2, scale, num_inliers, inliers.
+    # Returns (model, info) with model = {'R', 't', 'f1', 'f2', 'scale'} and
+    # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
+    # 'refinements'}; on total failure model holds the identity pose with
+    # f1=f2=scale=1.0 and info['num_inliers'] is 0.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
     x1c = x1 - _principal_point(principal_point1)
     x2c = x2 - _principal_point(principal_point2)
@@ -269,21 +288,24 @@ def estimate_varying_focal_relative_pose_with_monodepth(
                            weight_sampson)
 
     estimator = _get_estimator('varying-focal')
-    model, score, num_inliers, _ = estimator.estimate(
+    model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
         lo_iterations=lo_iterations, seed=seed)
 
     if num_inliers == 0:
-        return None, None, None, None, None, 0, None
+        return ({'R': np.eye(3), 't': np.zeros(3), 'f1': 1.0, 'f2': 1.0,
+                'scale': 1.0},
+                failure_info(len(x1), ransac_iterations))
 
     R = model[:9].reshape(3, 3).copy()
     t = model[9:12].copy()
     f1 = float(model[12])
     f2 = float(model[13])
     scale = float(model[14])
-    _, inliers, num_inliers = MonoDepthFocalPoseSampsonScorer.score_numpy(
+    score, inliers, num_inliers = MonoDepthFocalPoseSampsonScorer.score_numpy(
         R, t, f1, f2, x1c, x2c, max_error)
+    refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
     if final_refinement_iterations != 0 and num_inliers > 0:
@@ -291,20 +313,22 @@ def estimate_varying_focal_relative_pose_with_monodepth(
         inlier_data = _monodepth_data(
             x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
             _scale_reproj(max_error, max_reproj_error), weight_sampson)
-        refined = np.empty(15)
+        refined_model = np.empty(15)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined, max_error ** 2,
+        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
                                 num_final_iterations):
-            R_c = refined[:9].reshape(3, 3).copy()
-            t_c = refined[9:12].copy()
-            f1_c = float(refined[12])
-            f2_c = float(refined[13])
-            scale_c = float(refined[14])
-            _, inliers_c, num_inliers_c = MonoDepthFocalPoseSampsonScorer.score_numpy(
+            R_c = refined_model[:9].reshape(3, 3).copy()
+            t_c = refined_model[9:12].copy()
+            f1_c = float(refined_model[12])
+            f2_c = float(refined_model[13])
+            scale_c = float(refined_model[14])
+            score_c, inliers_c, num_inliers_c = MonoDepthFocalPoseSampsonScorer.score_numpy(
                 R_c, t_c, f1_c, f2_c, x1c, x2c, max_error)
-            R, t, f1, f2, scale = R_c, t_c, f1_c, f2_c, scale_c
+            R, t, f1, f2, scale, score = R_c, t_c, f1_c, f2_c, scale_c, score_c
             inliers, num_inliers = inliers_c, num_inliers_c
+            refined = True
 
-    return R, t, f1, f2, scale, num_inliers, inliers
+    return ({'R': R, 't': t, 'f1': f1, 'f2': f2, 'scale': scale},
+            build_info(inliers, num_inliers, score, ransac_iterations, refined))

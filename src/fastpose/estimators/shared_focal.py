@@ -3,7 +3,7 @@
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import normalize_points
+from fastpose.estimators.utils import build_info, failure_info, normalize_points
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.shared_focal import LMSharedFocalPoseRefiner
 from fastpose.scorers.sampson import SharedFocalPoseSampsonScorer
@@ -65,7 +65,10 @@ def estimate_relative_pose_with_shared_focal(
     # omitted, zero is assumed. final_refinement_iterations is the LM step
     # budget for the final Cauchy-loss polish pass on the RANSAC inliers,
     # independent of lo_iterations; defaults to 100, 0 disables the pass.
-    # Returns R, t, f, num_inliers, inliers.
+    # Returns (model, info) with model = {'R', 't', 'f'} and
+    # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
+    # 'refinements'}; on total failure model holds the identity pose with
+    # f=1.0 and info['num_inliers'] is 0.
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
     pp1 = _principal_point(principal_point1)
@@ -79,37 +82,42 @@ def estimate_relative_pose_with_shared_focal(
     data = _data_tuple(x1n, x2n, pp1n, pp2n)
 
     estimator = _get_default_estimator()
-    model, score, num_inliers, _ = estimator.estimate(
+    model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error * scale, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
         lo_iterations=lo_iterations, seed=seed)
 
     if num_inliers == 0:
-        return None, None, None, 0, None
+        return ({'R': np.eye(3), 't': np.zeros(3), 'f': 1.0},
+                failure_info(len(x1), ransac_iterations))
 
     R = model[:9].reshape(3, 3).copy()
     t = model[9:12].copy()
     f = float(model[12] / scale)
-    _, inliers, num_inliers = SharedFocalPoseSampsonScorer.score_numpy(
+    score, inliers, num_inliers = SharedFocalPoseSampsonScorer.score_numpy(
         R, t, f, pp1, pp2, x1, x2, max_error)
+    refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers,
     # done in the same normalized frame/threshold as the RANSAC pipeline
     if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner()
         inlier_data = _data_tuple(x1n[inliers], x2n[inliers], pp1n, pp2n)
-        refined = np.empty(14)
+        refined_model = np.empty(14)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined,
+        if final_refiner.refine(inlier_data, model, refined_model,
                                 (max_error * scale) ** 2,
                                 num_final_iterations):
-            R_c = refined[:9].reshape(3, 3).copy()
-            t_c = refined[9:12].copy()
-            f_c = float(refined[12] / scale)
-            _, inliers_c, num_inliers_c = SharedFocalPoseSampsonScorer.score_numpy(
+            R_c = refined_model[:9].reshape(3, 3).copy()
+            t_c = refined_model[9:12].copy()
+            f_c = float(refined_model[12] / scale)
+            score_c, inliers_c, num_inliers_c = SharedFocalPoseSampsonScorer.score_numpy(
                 R_c, t_c, f_c, pp1, pp2, x1, x2, max_error)
-            R, t, f, inliers, num_inliers = R_c, t_c, f_c, inliers_c, num_inliers_c
+            R, t, f, inliers, num_inliers, score = (R_c, t_c, f_c, inliers_c,
+                                                     num_inliers_c, score_c)
+            refined = True
 
-    return R, t, f, num_inliers, inliers
+    return ({'R': R, 't': t, 'f': f},
+            build_info(inliers, num_inliers, score, ransac_iterations, refined))

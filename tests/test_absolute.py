@@ -50,28 +50,28 @@ def test_p3p_solver_recovers_exact_pose():
 def test_absolute_estimator_recovers_exact_pose():
     xn, X, R_gt, t_gt = make_abspose_scene(1)
 
-    R, t, num_inliers, inliers = estimate_absolute_pose(
+    model, info = estimate_absolute_pose(
         xn, X, iterations=30, min_iterations=30, max_error=1e-3,
         seed=0, lo_iterations=0)
 
-    assert num_inliers == len(xn)
-    assert np.all(inliers)
-    assert rotation_error_deg(R, R_gt) < 1e-4
-    assert np.linalg.norm(t - t_gt) < 1e-4
+    assert info['num_inliers'] == len(xn)
+    assert np.all(info['inliers'])
+    assert rotation_error_deg(model['R'], R_gt) < 1e-4
+    assert np.linalg.norm(model['t'] - t_gt) < 1e-4
 
 
 def test_absolute_estimator_camera_matrix_recovers_exact_pose():
     x, X, R_gt, t_gt = make_abspose_scene_pixels(1)
     K = np.array([[FOCAL, 0.0, PP[0]], [0.0, FOCAL, PP[1]], [0.0, 0.0, 1.0]])
 
-    R, t, num_inliers, inliers = estimate_absolute_pose(
+    model, info = estimate_absolute_pose(
         x, X, camera=K, iterations=30, min_iterations=30,
         max_error=1e-3 * FOCAL, seed=0, lo_iterations=0)
 
-    assert num_inliers == len(x)
-    assert np.all(inliers)
-    assert rotation_error_deg(R, R_gt) < 1e-4
-    assert np.linalg.norm(t - t_gt) < 1e-4
+    assert info['num_inliers'] == len(x)
+    assert np.all(info['inliers'])
+    assert rotation_error_deg(model['R'], R_gt) < 1e-4
+    assert np.linalg.norm(model['t'] - t_gt) < 1e-4
 
 
 def test_absolute_estimator_poselib_camera_recovers_exact_pose():
@@ -80,28 +80,27 @@ def test_absolute_estimator_poselib_camera_recovers_exact_pose():
     camera = poselib.Camera('PINHOLE', [FOCAL, FOCAL, PP[0], PP[1]],
                             int(IMAGE_SIZE), int(IMAGE_SIZE))
 
-    R, t, num_inliers, inliers = estimate_absolute_pose(
+    model, info = estimate_absolute_pose(
         x, X, camera=camera, iterations=30, min_iterations=30,
         max_error=1e-3 * FOCAL, seed=0, lo_iterations=0)
 
-    assert num_inliers == len(x)
-    assert np.all(inliers)
-    assert rotation_error_deg(R, R_gt) < 1e-4
-    assert np.linalg.norm(t - t_gt) < 1e-4
+    assert info['num_inliers'] == len(x)
+    assert np.all(info['inliers'])
+    assert rotation_error_deg(model['R'], R_gt) < 1e-4
+    assert np.linalg.norm(model['t'] - t_gt) < 1e-4
 
 
 def test_absolute_estimator_handles_outliers_with_lo():
     xn, X, R_gt, t_gt = make_abspose_scene(2, num_samples=500,
                                            noise_sigma=1.0, outlier_ratio=0.3)
 
-    R, t, num_inliers, inliers = estimate_absolute_pose(
+    model, info = estimate_absolute_pose(
         xn, X, iterations=100, min_iterations=100, max_error=2.0 / 1000.0,
         seed=0)
 
-    assert R is not None
-    assert num_inliers > 300
-    assert rotation_error_deg(R, R_gt) < 0.2
-    assert np.linalg.norm(t - t_gt) < 0.05
+    assert info['num_inliers'] > 300
+    assert rotation_error_deg(model['R'], R_gt) < 0.2
+    assert np.linalg.norm(model['t'] - t_gt) < 0.05
 
 
 def test_absolute_estimator_lo_improves_over_plain_ransac():
@@ -110,10 +109,28 @@ def test_absolute_estimator_lo_improves_over_plain_ransac():
 
     errs = {}
     for label, lo in (('plain', 0), ('lo', None)):
-        R, t, num_inliers, inliers = estimate_absolute_pose(
+        model, info = estimate_absolute_pose(
             xn, X, iterations=50, min_iterations=50, max_error=2.0 / 1000.0,
             seed=3, lo_iterations=lo)
-        assert R is not None
-        errs[label] = rotation_error_deg(R, R_gt)
+        assert info['num_inliers'] > 0
+        errs[label] = rotation_error_deg(model['R'], R_gt)
 
     assert errs['lo'] <= errs['plain'] + 1e-9
+
+
+def test_absolute_estimator_failure_returns_generic_pose():
+    rng = np.random.default_rng(4)
+    # max_error=0.0 means no correspondence can ever satisfy the inlier
+    # threshold (not even a minimal sample's own points, whose residual is
+    # only zero up to floating-point rounding), so RANSAC always fails
+    xn = rng.uniform(-0.5, 0.5, size=(20, 2))
+    X = rng.uniform(-1.0, 1.0, size=(20, 3)) + np.array([0.0, 0.0, 5.0])
+
+    model, info = estimate_absolute_pose(
+        xn, X, iterations=20, min_iterations=20, max_error=0.0, seed=0)
+
+    assert info['num_inliers'] == 0
+    assert info['refinements'] == 0
+    assert not np.any(info['inliers'])
+    np.testing.assert_array_equal(model['R'], np.eye(3))
+    np.testing.assert_array_equal(model['t'], np.zeros(3))

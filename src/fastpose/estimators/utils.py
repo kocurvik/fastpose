@@ -5,6 +5,27 @@ import math
 import numpy as np
 
 
+def build_info(inliers, num_inliers, score, iterations, refined):
+    # the `info` half of an estimator's (model, info) return: inliers is a
+    # boolean mask over the input correspondences, model_score the scorer's
+    # truncated score for `model`, iterations the number of RANSAC samples
+    # drawn, refinements whether the post-RANSAC polish pass ran and its
+    # result was adopted
+    return {
+        'inliers': inliers,
+        'num_inliers': int(num_inliers),
+        'model_score': float(score),
+        'iterations': int(iterations),
+        'refinements': int(refined),
+    }
+
+
+def failure_info(num_points, iterations):
+    # info dict for the case where RANSAC found no valid model at all
+    return build_info(np.zeros(num_points, dtype=np.bool_), 0, math.inf,
+                      iterations, False)
+
+
 def normalize_points(x1, x2):
     # single isotropic shift + scale shared by both images so that the
     # Sampson error (and therefore the inlier threshold) scales uniformly

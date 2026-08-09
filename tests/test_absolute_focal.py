@@ -41,28 +41,28 @@ def test_p4pf_solver_recovers_exact_pose_and_focal():
 def test_absolute_focal_estimator_recovers_exact_pose():
     xc, X, R_gt, t_gt = make_abspose_focal_scene(1)
 
-    R, t, f, num_inliers, inliers = estimate_absolute_pose_with_focal(
+    model, info = estimate_absolute_pose_with_focal(
         xc, X, iterations=30, min_iterations=30, max_error=1.0,
         seed=0, lo_iterations=0)
 
-    assert num_inliers == len(xc)
-    assert np.all(inliers)
-    assert abs(f - FOCAL) < 1e-3
-    assert rotation_error_deg(R, R_gt) < 1e-4
-    assert np.linalg.norm(t - t_gt) < 1e-4
+    assert info['num_inliers'] == len(xc)
+    assert np.all(info['inliers'])
+    assert abs(model['f'] - FOCAL) < 1e-3
+    assert rotation_error_deg(model['R'], R_gt) < 1e-4
+    assert np.linalg.norm(model['t'] - t_gt) < 1e-4
 
 
 def test_absolute_focal_estimator_handles_principal_point():
     xc, X, R_gt, t_gt = make_abspose_focal_scene(2)
     pp = np.array([640.0, 520.0])
 
-    R, t, f, num_inliers, inliers = estimate_absolute_pose_with_focal(
+    model, info = estimate_absolute_pose_with_focal(
         xc + pp, X, principal_point=pp, iterations=30, min_iterations=30,
         max_error=1.0, seed=0, lo_iterations=0)
 
-    assert num_inliers == len(xc)
-    assert abs(f - FOCAL) < 1e-3
-    assert rotation_error_deg(R, R_gt) < 1e-4
+    assert info['num_inliers'] == len(xc)
+    assert abs(model['f'] - FOCAL) < 1e-3
+    assert rotation_error_deg(model['R'], R_gt) < 1e-4
 
 
 def test_absolute_focal_estimator_handles_outliers_with_lo():
@@ -70,11 +70,10 @@ def test_absolute_focal_estimator_handles_outliers_with_lo():
                                                  noise_sigma=1.0,
                                                  outlier_ratio=0.3)
 
-    R, t, f, num_inliers, inliers = estimate_absolute_pose_with_focal(
+    model, info = estimate_absolute_pose_with_focal(
         xc, X, iterations=100, min_iterations=100, max_error=2.0, seed=0)
 
-    assert R is not None
-    assert num_inliers > 280
-    assert abs(f - FOCAL) / FOCAL < 0.02
-    assert rotation_error_deg(R, R_gt) < 0.5
-    assert np.linalg.norm(t - t_gt) < 0.1
+    assert info['num_inliers'] > 280
+    assert abs(model['f'] - FOCAL) / FOCAL < 0.02
+    assert rotation_error_deg(model['R'], R_gt) < 0.5
+    assert np.linalg.norm(model['t'] - t_gt) < 0.1

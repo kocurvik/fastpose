@@ -28,9 +28,10 @@ from fastpose.estimators.absolute_focal import estimate_absolute_pose_with_focal
 MEAN_SCENE_DEPTH = 7.0  # depths are drawn uniformly from [4, 10]
 
 
-def _abs_pose_error(R_est, t_est, R_gt, t_gt):
-    if R_est is None:
+def _abs_pose_error(model, est_info, R_gt, t_gt):
+    if est_info['num_inliers'] == 0:
         return 180.0
+    R_est, t_est = model['R'], model['t']
     rot = rotation_error_deg(R_est, R_gt)
     c_est = -R_est.T @ t_est
     c_gt = -R_gt.T @ t_gt
@@ -71,10 +72,10 @@ def evaluate_maa(num_scenes=100, num_samples=5000, noise_sigma=2.0,
         for si, (x, xn, X, R_gt, t_gt) in enumerate(scenes):
             for method, lo in (('numba', 0), ('numba+LO', None)):
                 start = time.perf_counter()
-                R_est, t_est, num_inliers, inliers = estimate_absolute_pose(
+                model, est_info = estimate_absolute_pose(
                     xn, X, iterations=iters, max_error=max_error / focal,
                     lo_iterations=lo, seed=si)
-                err = _abs_pose_error(R_est, t_est, R_gt, t_gt)
+                err = _abs_pose_error(model, est_info, R_gt, t_gt)
                 times[method].append(time.perf_counter() - start)
                 errors[method].append(err)
 
@@ -87,7 +88,8 @@ def evaluate_maa(num_scenes=100, num_samples=5000, noise_sigma=2.0,
             # poselib 3.0 returns an Image (pose + camera)
             image, info = poselib.estimate_absolute_pose(x, X, camera,
                                                          ransac_options)
-            err = _abs_pose_error(image.pose.R, image.pose.t, R_gt, t_gt)
+            err = _abs_pose_error({'R': image.pose.R, 't': image.pose.t},
+                                  {'num_inliers': 1}, R_gt, t_gt)
             times['poselib'].append(time.perf_counter() - start)
             errors['poselib'].append(err)
 
@@ -140,12 +142,13 @@ def run_scaling_benchmark():
             times = []
             for _ in range(repeats):
                 start = time.perf_counter()
-                R_est, t_est, num_inliers, inliers = estimate_absolute_pose(
+                model, est_info = estimate_absolute_pose(
                     xn, X, iterations=iterations, max_error=max_error / focal,
                     lo_iterations=lo)
                 times.append(time.perf_counter() - start)
-            rot_err = rotation_error_deg(R_est, R_gt)
-            print(f'{label:11s} {min(times):.4f}s, inliers={num_inliers}/{num_samples}, '
+            rot_err = rotation_error_deg(model['R'], R_gt)
+            print(f'{label:11s} {min(times):.4f}s, '
+                  f'inliers={est_info["num_inliers"]}/{num_samples}, '
                   f'rot err={rot_err:.3f} deg')
 
         times = []
@@ -189,17 +192,17 @@ def run_focal_scaling_benchmark():
             times = []
             for _ in range(repeats):
                 start = time.perf_counter()
-                R_est, t_est, f_est, num_inliers, inliers = (
-                    estimate_absolute_pose_with_focal(
-                        xc, X, iterations=iterations, max_error=max_error,
-                        lo_iterations=lo))
+                model, est_info = estimate_absolute_pose_with_focal(
+                    xc, X, iterations=iterations, max_error=max_error,
+                    lo_iterations=lo)
                 times.append(time.perf_counter() - start)
-            if R_est is None:
+            if est_info['num_inliers'] == 0:
                 print(f'{label:11s} {min(times):.4f}s, no model returned')
                 continue
-            rot_err = rotation_error_deg(R_est, R_gt)
-            focal_err = abs(f_est - focal) / focal
-            print(f'{label:11s} {min(times):.4f}s, inliers={num_inliers}/{num_samples}, '
+            rot_err = rotation_error_deg(model['R'], R_gt)
+            focal_err = abs(model['f'] - focal) / focal
+            print(f'{label:11s} {min(times):.4f}s, '
+                  f'inliers={est_info["num_inliers"]}/{num_samples}, '
                   f'rot err={rot_err:.3f} deg, focal err={focal_err:.3%}')
         print()
 
@@ -235,22 +238,21 @@ def evaluate_focal_maa(num_scenes=100, num_samples=5000, noise_sigma=2.0,
         focal_errs = []
         for si, (xc, xn, X, R_gt, t_gt) in enumerate(scenes):
             start = time.perf_counter()
-            R_est, t_est, num_inliers, inliers = estimate_absolute_pose(
+            model, est_info = estimate_absolute_pose(
                 xn, X, iterations=iters, max_error=max_error / focal,
                 lo_iterations=None, seed=si)
             times['p3p+gtf'].append(time.perf_counter() - start)
-            errors['p3p+gtf'].append(_abs_pose_error(R_est, t_est, R_gt, t_gt))
+            errors['p3p+gtf'].append(_abs_pose_error(model, est_info, R_gt, t_gt))
 
             for method, lo in (('p4pf', 0), ('p4pf+LO', None)):
                 start = time.perf_counter()
-                R_est, t_est, f_est, num_inliers, inliers = (
-                    estimate_absolute_pose_with_focal(
-                        xc, X, iterations=iters, max_error=max_error,
-                        lo_iterations=lo, seed=si))
+                model, est_info = estimate_absolute_pose_with_focal(
+                    xc, X, iterations=iters, max_error=max_error,
+                    lo_iterations=lo, seed=si)
                 times[method].append(time.perf_counter() - start)
-                errors[method].append(_abs_pose_error(R_est, t_est, R_gt, t_gt))
-                if method == 'p4pf+LO' and f_est is not None:
-                    focal_errs.append(abs(f_est - focal) / focal)
+                errors[method].append(_abs_pose_error(model, est_info, R_gt, t_gt))
+                if method == 'p4pf+LO' and est_info['num_inliers'] > 0:
+                    focal_errs.append(abs(model['f'] - focal) / focal)
 
         print(f'--- {iters} iterations ---')
         for m in methods:

@@ -7,7 +7,8 @@ for benchmarking.
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import normalize_points, point_columns
+from fastpose.estimators.utils import (build_info, failure_info,
+                                       normalize_points, point_columns)
 from fastpose.refiners.fundamental import LMFundamentalRefiner
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.sampson import SampsonScorer
@@ -74,39 +75,44 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
     # final_refinement_iterations - LM step budget for the final Cauchy-loss
     #                 polish pass on the RANSAC inliers; independent of
     #                 lo_iterations. Defaults to 100; 0 disables the pass
-    # returns best_model, best_num_inliers, best_inliers
+    # returns (model, info) with model = {'F'} and info = {'inliers',
+    # 'num_inliers', 'model_score', 'iterations', 'refinements'}; on total
+    # failure model holds an all-zero placeholder F and
+    # info['num_inliers'] is 0
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
     x1n, x2n, T, scale = normalize_points(x1, x2)
     data = point_columns(x1n, x2n)
 
     estimator = _get_default_estimator()
-    model, score, num_inliers, _ = estimator.estimate(
+    model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error * scale, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
         lo_iterations=lo_iterations, seed=seed)
 
     if num_inliers == 0:
-        return None, 0, None
+        return {'F': np.zeros((3, 3))}, failure_info(len(x1), ransac_iterations)
 
     F = T.T @ model.reshape(3, 3) @ T
-    _, inliers, num_inliers = SampsonScorer.score_numpy(F, x1, x2, max_error)
+    score, inliers, num_inliers = SampsonScorer.score_numpy(F, x1, x2, max_error)
+    refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers,
     # done in the same normalized frame/threshold as the RANSAC pipeline
     if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner()
         inlier_data = point_columns(x1n[inliers], x2n[inliers])
-        refined = np.empty(9)
+        refined_model = np.empty(9)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined,
+        if final_refiner.refine(inlier_data, model, refined_model,
                                 (max_error * scale) ** 2,
                                 num_final_iterations):
-            F_c = T.T @ refined.reshape(3, 3) @ T
-            _, inliers_c, num_inliers_c = SampsonScorer.score_numpy(
+            F_c = T.T @ refined_model.reshape(3, 3) @ T
+            score_c, inliers_c, num_inliers_c = SampsonScorer.score_numpy(
                 F_c, x1, x2, max_error)
-            F, inliers, num_inliers = F_c, inliers_c, num_inliers_c
+            F, inliers, num_inliers, score = F_c, inliers_c, num_inliers_c, score_c
+            refined = True
 
-    return F, num_inliers, inliers
+    return {'F': F}, build_info(inliers, num_inliers, score, ransac_iterations, refined)

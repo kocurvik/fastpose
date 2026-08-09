@@ -136,41 +136,38 @@ def test_monodepth_varying_focal_solver_recovers_exact_model():
 
 def test_monodepth_estimator_recovers_exact_pose():
     x1, x2, d1, d2, R_gt, t_gt, _, _ = make_scene(4)
-    R, t, scale, shift1, shift2, num_inliers, inliers = (
-        estimate_relative_pose_with_monodepth(
-            x1, x2, d1, d2, iterations=20, min_iterations=20,
-            max_error=0.001, seed=0, lo_iterations=0))
-    assert num_inliers == len(x1)
-    assert np.all(inliers)
-    assert rotation_error_deg(R, R_gt) < 1e-5
-    assert abs(scale - SCALE_GT) < 1e-6
-    assert shift1 == 0.0 and shift2 == 0.0
-    assert np.abs(t - ALPHA1 * t_gt).max() < 1e-6
+    model, info = estimate_relative_pose_with_monodepth(
+        x1, x2, d1, d2, iterations=20, min_iterations=20,
+        max_error=0.001, seed=0, lo_iterations=0)
+    assert info['num_inliers'] == len(x1)
+    assert np.all(info['inliers'])
+    assert rotation_error_deg(model['R'], R_gt) < 1e-5
+    assert abs(model['scale'] - SCALE_GT) < 1e-6
+    assert model['shift1'] == 0.0 and model['shift2'] == 0.0
+    assert np.abs(model['t'] - ALPHA1 * t_gt).max() < 1e-6
 
 
 def test_monodepth_estimator_recovers_exact_shifts():
     x1, x2, d1, d2, R_gt, t_gt, u_gt, v_gt = make_scene(5, with_shift=True)
-    R, t, scale, shift1, shift2, num_inliers, inliers = (
-        estimate_relative_pose_with_monodepth(
-            x1, x2, d1, d2, estimate_shift=True, iterations=20,
-            min_iterations=20, max_error=0.001, seed=0, lo_iterations=0))
-    assert num_inliers == len(x1)
-    assert rotation_error_deg(R, R_gt) < 1e-5
-    assert abs(scale - SCALE_GT) < 1e-6
-    assert abs(shift1 - u_gt * ALPHA1) < 1e-5
-    assert abs(shift2 - v_gt * ALPHA2) < 1e-5
+    model, info = estimate_relative_pose_with_monodepth(
+        x1, x2, d1, d2, estimate_shift=True, iterations=20,
+        min_iterations=20, max_error=0.001, seed=0, lo_iterations=0)
+    assert info['num_inliers'] == len(x1)
+    assert rotation_error_deg(model['R'], R_gt) < 1e-5
+    assert abs(model['scale'] - SCALE_GT) < 1e-6
+    assert abs(model['shift1'] - u_gt * ALPHA1) < 1e-5
+    assert abs(model['shift2'] - v_gt * ALPHA2) < 1e-5
 
 
 def test_monodepth_shared_focal_estimator_recovers_exact_model():
     x1, x2, d1, d2, R_gt, t_gt, _, _ = make_scene(6, calibrated=False)
-    R, t, f, scale, num_inliers, inliers = (
-        estimate_shared_focal_relative_pose_with_monodepth(
-            x1, x2, d1, d2, iterations=20, min_iterations=20,
-            max_error=1.0, seed=0, lo_iterations=0))
-    assert num_inliers == len(x1)
-    assert rotation_error_deg(R, R_gt) < 1e-5
-    assert abs(f - FOCAL) / FOCAL < 1e-6
-    assert abs(scale - SCALE_GT) < 1e-6
+    model, info = estimate_shared_focal_relative_pose_with_monodepth(
+        x1, x2, d1, d2, iterations=20, min_iterations=20,
+        max_error=1.0, seed=0, lo_iterations=0)
+    assert info['num_inliers'] == len(x1)
+    assert rotation_error_deg(model['R'], R_gt) < 1e-5
+    assert abs(model['f'] - FOCAL) / FOCAL < 1e-6
+    assert abs(model['scale'] - SCALE_GT) < 1e-6
 
 
 def test_monodepth_varying_focal_estimator_recovers_exact_model():
@@ -178,15 +175,14 @@ def test_monodepth_varying_focal_estimator_recovers_exact_model():
         7, calibrated=False, shared_focal=False)
     pp1 = np.array([500.0, 480.0])
     pp2 = np.array([620.0, 510.0])
-    R, t, f1, f2, scale, num_inliers, inliers = (
-        estimate_varying_focal_relative_pose_with_monodepth(
-            x1 + pp1, x2 + pp2, d1, d2, pp1, pp2, iterations=20,
-            min_iterations=20, max_error=1.0, seed=0, lo_iterations=0))
-    assert num_inliers == len(x1)
-    assert rotation_error_deg(R, R_gt) < 1e-5
-    assert abs(f1 - FOCAL1) / FOCAL1 < 1e-6
-    assert abs(f2 - FOCAL2) / FOCAL2 < 1e-6
-    assert abs(scale - SCALE_GT) < 1e-6
+    model, info = estimate_varying_focal_relative_pose_with_monodepth(
+        x1 + pp1, x2 + pp2, d1, d2, pp1, pp2, iterations=20,
+        min_iterations=20, max_error=1.0, seed=0, lo_iterations=0)
+    assert info['num_inliers'] == len(x1)
+    assert rotation_error_deg(model['R'], R_gt) < 1e-5
+    assert abs(model['f1'] - FOCAL1) / FOCAL1 < 1e-6
+    assert abs(model['f2'] - FOCAL2) / FOCAL2 < 1e-6
+    assert abs(model['scale'] - SCALE_GT) < 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -197,14 +193,12 @@ def test_monodepth_estimator_handles_outliers_with_lo():
     x1, x2, d1, d2, R_gt, t_gt, _, _ = make_scene(
         8, num_samples=500, noise_sigma=0.5 / FOCAL, outlier_ratio=0.3,
         depth_noise=0.01)
-    R, t, scale, shift1, shift2, num_inliers, inliers = (
-        estimate_relative_pose_with_monodepth(
-            x1, x2, d1, d2, iterations=100, min_iterations=100,
-            max_error=2.0 / FOCAL, max_reproj_error=16.0 / FOCAL, seed=0))
-    assert R is not None
-    assert num_inliers > 300
-    assert rotation_error_deg(R, R_gt) < 0.5
-    assert abs(scale - SCALE_GT) / SCALE_GT < 0.05
+    model, info = estimate_relative_pose_with_monodepth(
+        x1, x2, d1, d2, iterations=100, min_iterations=100,
+        max_error=2.0 / FOCAL, max_reproj_error=16.0 / FOCAL, seed=0)
+    assert info['num_inliers'] > 300
+    assert rotation_error_deg(model['R'], R_gt) < 0.5
+    assert abs(model['scale'] - SCALE_GT) / SCALE_GT < 0.05
 
 
 def test_monodepth_estimator_camera_matrix_recovers_exact_pose():
@@ -216,17 +210,16 @@ def test_monodepth_estimator_camera_matrix_recovers_exact_pose():
         30, calibrated=False, shared_focal=True)
     K = np.array([[FOCAL, 0.0, 0.0], [0.0, FOCAL, 0.0], [0.0, 0.0, 1.0]])
 
-    R, t, scale, shift1, shift2, num_inliers, inliers = (
-        estimate_relative_pose_with_monodepth(
-            x1, x2, d1, d2, camera1=K, camera2=K, iterations=20,
-            min_iterations=20, max_error=0.001 * FOCAL, seed=0,
-            lo_iterations=0))
+    model, info = estimate_relative_pose_with_monodepth(
+        x1, x2, d1, d2, camera1=K, camera2=K, iterations=20,
+        min_iterations=20, max_error=0.001 * FOCAL, seed=0,
+        lo_iterations=0)
 
-    assert num_inliers == len(x1)
-    assert np.all(inliers)
-    assert rotation_error_deg(R, R_gt) < 1e-5
-    assert abs(scale - SCALE_GT) < 1e-6
-    assert np.abs(t - ALPHA1 * t_gt).max() < 1e-6
+    assert info['num_inliers'] == len(x1)
+    assert np.all(info['inliers'])
+    assert rotation_error_deg(model['R'], R_gt) < 1e-5
+    assert abs(model['scale'] - SCALE_GT) < 1e-6
+    assert np.abs(model['t'] - ALPHA1 * t_gt).max() < 1e-6
 
 
 def test_monodepth_estimator_poselib_camera_recovers_exact_pose():
@@ -235,63 +228,56 @@ def test_monodepth_estimator_poselib_camera_recovers_exact_pose():
         31, calibrated=False, shared_focal=True)
     camera = poselib.Camera('PINHOLE', [FOCAL, FOCAL, 0.0, 0.0], 2000, 2000)
 
-    R, t, scale, shift1, shift2, num_inliers, inliers = (
-        estimate_relative_pose_with_monodepth(
-            x1, x2, d1, d2, camera1=camera, camera2=camera, iterations=20,
-            min_iterations=20, max_error=0.001 * FOCAL, seed=0,
-            lo_iterations=0))
+    model, info = estimate_relative_pose_with_monodepth(
+        x1, x2, d1, d2, camera1=camera, camera2=camera, iterations=20,
+        min_iterations=20, max_error=0.001 * FOCAL, seed=0,
+        lo_iterations=0)
 
-    assert num_inliers == len(x1)
-    assert np.all(inliers)
-    assert rotation_error_deg(R, R_gt) < 1e-5
-    assert abs(scale - SCALE_GT) < 1e-6
-    assert np.abs(t - ALPHA1 * t_gt).max() < 1e-6
+    assert info['num_inliers'] == len(x1)
+    assert np.all(info['inliers'])
+    assert rotation_error_deg(model['R'], R_gt) < 1e-5
+    assert abs(model['scale'] - SCALE_GT) < 1e-6
+    assert np.abs(model['t'] - ALPHA1 * t_gt).max() < 1e-6
 
 
 def test_monodepth_shift_estimator_handles_outliers_with_lo():
     x1, x2, d1, d2, R_gt, t_gt, u_gt, v_gt = make_scene(
         9, num_samples=500, noise_sigma=0.5 / FOCAL, outlier_ratio=0.3,
         depth_noise=0.01, with_shift=True)
-    R, t, scale, shift1, shift2, num_inliers, inliers = (
-        estimate_relative_pose_with_monodepth(
-            x1, x2, d1, d2, estimate_shift=True, iterations=100,
-            min_iterations=100, max_error=2.0 / FOCAL,
-            max_reproj_error=16.0 / FOCAL, seed=0))
-    assert R is not None
-    assert num_inliers > 300
-    assert rotation_error_deg(R, R_gt) < 0.5
-    assert abs(scale - SCALE_GT) / SCALE_GT < 0.05
+    model, info = estimate_relative_pose_with_monodepth(
+        x1, x2, d1, d2, estimate_shift=True, iterations=100,
+        min_iterations=100, max_error=2.0 / FOCAL,
+        max_reproj_error=16.0 / FOCAL, seed=0)
+    assert info['num_inliers'] > 300
+    assert rotation_error_deg(model['R'], R_gt) < 0.5
+    assert abs(model['scale'] - SCALE_GT) / SCALE_GT < 0.05
 
 
 def test_monodepth_shared_focal_estimator_handles_outliers_with_lo():
     x1, x2, d1, d2, R_gt, t_gt, _, _ = make_scene(
         10, num_samples=500, noise_sigma=0.5, outlier_ratio=0.3,
         depth_noise=0.01, calibrated=False)
-    R, t, f, scale, num_inliers, inliers = (
-        estimate_shared_focal_relative_pose_with_monodepth(
-            x1, x2, d1, d2, iterations=100, min_iterations=100,
-            max_error=2.0, seed=0))
-    assert R is not None
-    assert num_inliers > 300
-    assert rotation_error_deg(R, R_gt) < 0.5
-    assert abs(f - FOCAL) / FOCAL < 0.05
-    assert abs(scale - SCALE_GT) / SCALE_GT < 0.05
+    model, info = estimate_shared_focal_relative_pose_with_monodepth(
+        x1, x2, d1, d2, iterations=100, min_iterations=100,
+        max_error=2.0, seed=0)
+    assert info['num_inliers'] > 300
+    assert rotation_error_deg(model['R'], R_gt) < 0.5
+    assert abs(model['f'] - FOCAL) / FOCAL < 0.05
+    assert abs(model['scale'] - SCALE_GT) / SCALE_GT < 0.05
 
 
 def test_monodepth_varying_focal_estimator_handles_outliers_with_lo():
     x1, x2, d1, d2, R_gt, t_gt, _, _ = make_scene(
         11, num_samples=500, noise_sigma=0.5, outlier_ratio=0.3,
         depth_noise=0.01, calibrated=False, shared_focal=False)
-    R, t, f1, f2, scale, num_inliers, inliers = (
-        estimate_varying_focal_relative_pose_with_monodepth(
-            x1, x2, d1, d2, iterations=100, min_iterations=100,
-            max_error=2.0, seed=0))
-    assert R is not None
-    assert num_inliers > 300
-    assert rotation_error_deg(R, R_gt) < 0.5
-    assert abs(f1 - FOCAL1) / FOCAL1 < 0.05
-    assert abs(f2 - FOCAL2) / FOCAL2 < 0.05
-    assert abs(scale - SCALE_GT) / SCALE_GT < 0.05
+    model, info = estimate_varying_focal_relative_pose_with_monodepth(
+        x1, x2, d1, d2, iterations=100, min_iterations=100,
+        max_error=2.0, seed=0)
+    assert info['num_inliers'] > 300
+    assert rotation_error_deg(model['R'], R_gt) < 0.5
+    assert abs(model['f1'] - FOCAL1) / FOCAL1 < 0.05
+    assert abs(model['f2'] - FOCAL2) / FOCAL2 < 0.05
+    assert abs(model['scale'] - SCALE_GT) / SCALE_GT < 0.05
 
 
 # ---------------------------------------------------------------------------

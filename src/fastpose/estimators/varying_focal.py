@@ -3,7 +3,7 @@
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import normalize_points
+from fastpose.estimators.utils import build_info, failure_info, normalize_points
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.varying_focal import LMVaryingFocalPoseRefiner
 from fastpose.scorers.sampson import VaryingFocalPoseSampsonScorer
@@ -65,7 +65,10 @@ def estimate_relative_pose_with_varying_focals(
     # final_refinement_iterations is the LM step budget for the final
     # Cauchy-loss polish pass on the RANSAC inliers, independent of
     # lo_iterations; defaults to 100, 0 disables the pass.
-    # returns R, t, f1, f2, num_inliers, inliers
+    # returns (model, info) with model = {'R', 't', 'f1', 'f2'} and
+    # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
+    # 'refinements'}; on total failure model holds the identity pose with
+    # f1=f2=1.0 and info['num_inliers'] is 0.
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
     pp1 = _principal_point(principal_point1)
@@ -79,40 +82,44 @@ def estimate_relative_pose_with_varying_focals(
     data = _data_tuple(x1n, x2n, pp1n, pp2n)
 
     estimator = _get_default_estimator()
-    model, score, num_inliers, _ = estimator.estimate(
+    model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error * scale, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
         lo_iterations=lo_iterations, seed=seed)
 
     if num_inliers == 0:
-        return None, None, None, None, 0, None
+        return ({'R': np.eye(3), 't': np.zeros(3), 'f1': 1.0, 'f2': 1.0},
+                failure_info(len(x1), ransac_iterations))
 
     R = model[:9].reshape(3, 3).copy()
     t = model[9:12].copy()
     f1 = float(model[12] / scale)
     f2 = float(model[13] / scale)
-    _, inliers, num_inliers = VaryingFocalPoseSampsonScorer.score_numpy(
+    score, inliers, num_inliers = VaryingFocalPoseSampsonScorer.score_numpy(
         R, t, f1, f2, pp1, pp2, x1, x2, max_error)
+    refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers,
     # done in the same normalized frame/threshold as the RANSAC pipeline
     if final_refinement_iterations != 0 and num_inliers > 0:
         final_refiner = _get_final_refiner()
         inlier_data = _data_tuple(x1n[inliers], x2n[inliers], pp1n, pp2n)
-        refined = np.empty(14)
+        refined_model = np.empty(14)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined,
+        if final_refiner.refine(inlier_data, model, refined_model,
                                 (max_error * scale) ** 2,
                                 num_final_iterations):
-            R_c = refined[:9].reshape(3, 3).copy()
-            t_c = refined[9:12].copy()
-            f1_c = float(refined[12] / scale)
-            f2_c = float(refined[13] / scale)
-            _, inliers_c, num_inliers_c = VaryingFocalPoseSampsonScorer.score_numpy(
+            R_c = refined_model[:9].reshape(3, 3).copy()
+            t_c = refined_model[9:12].copy()
+            f1_c = float(refined_model[12] / scale)
+            f2_c = float(refined_model[13] / scale)
+            score_c, inliers_c, num_inliers_c = VaryingFocalPoseSampsonScorer.score_numpy(
                 R_c, t_c, f1_c, f2_c, pp1, pp2, x1, x2, max_error)
-            R, t, f1, f2 = R_c, t_c, f1_c, f2_c
+            R, t, f1, f2, score = R_c, t_c, f1_c, f2_c, score_c
             inliers, num_inliers = inliers_c, num_inliers_c
+            refined = True
 
-    return R, t, f1, f2, num_inliers, inliers
+    return ({'R': R, 't': t, 'f1': f1, 'f2': f2},
+            build_info(inliers, num_inliers, score, ransac_iterations, refined))
