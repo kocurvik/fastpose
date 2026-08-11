@@ -239,6 +239,13 @@ principal points:
 - **LM refiner** (`src/fastpose/refiners/shared_focal.py`): 6 tangent parameters —
   rotation (3), translation direction (2) and one shared log-focal — with
   the Sampson jacobian built like the varying-focal refiner.
+- The solver is the one module compiled **without** `fastmath`: its
+  action-matrix/characteristic-polynomial chain is ill-conditioned enough that
+  allowing reassociation made the recovered focal depend on whether the kernels
+  were freshly compiled or loaded from the numba cache (~1e-8 relative, never
+  enough to move an inlier count). Disabling it costs no measurable runtime and
+  makes the solver bit-reproducible; the shared scorer and LM engine keep
+  `fastmath`, where it does pay.
 
 ## Monodepth relative pose backends
 

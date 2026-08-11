@@ -4,6 +4,17 @@ Port of PoseLib's relpose_6pt_focal.cc. The generated polynomial
 coefficient block and elimination-template index tables are kept in the same
 shape as the upstream solver; surrounding linear algebra follows the local
 Numba solver style used by the 5-point and P4Pf solvers.
+
+Deliberately no `fastmath=True` anywhere in this module, unlike the other
+solvers. The pipeline here - 31x31 elimination template, 15x15 action matrix,
+Danilevsky characteristic polynomial, Sturm root isolation - is ill-conditioned
+enough that it amplifies last-bit differences into the 8th significant digit of
+the recovered focal. fastmath lets LLVM reassociate, and the association it
+picks depends on whether a callee was compiled in this process or loaded from
+the numba cache as object code (which cannot be cross-inlined), so results
+moved with the state of the on-disk cache. Measured on a solver-dominated
+benchmark, fastmath bought nothing here (0.078 s vs 0.079-0.092 s for 3000
+iterations), so the reproducibility is free.
 """
 
 import math
@@ -1166,7 +1177,7 @@ _MIX_21 = -0.5660808970350308
 _MIX_22 = 0.45579152232219433
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True)
 def _nullspace_6pt(A, N):
     # 3-dimensional nullspace of the 6x9 epipolar system via Gaussian
     # elimination (pivots on columns 0..5, free variables 6..8), modified
@@ -1232,7 +1243,7 @@ def _nullspace_6pt(A, N):
     return True
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True)
 def _fill_coeffs(d, coeffs):
     # every term is a factor times a product of exactly three entries of d
     for ci in range(280):
@@ -1243,7 +1254,7 @@ def _fill_coeffs(d, coeffs):
         coeffs[ci] = acc
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True)
 def _solve_linear_31x15(C, C12):
     # C12 <- C0^-1 C1 for the augmented matrix C = [C0 | C1] (31, 46), via
     # Gaussian elimination with partial pivoting; the augmented layout keeps
@@ -1291,7 +1302,7 @@ def _solve_linear_31x15(C, C12):
     return True
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True)
 def _charpoly_danilevsky_n(T, coef, row, tmp_row, n):
     for i in range(n - 1, 0, -1):
         piv_ind = i - 1
@@ -1339,7 +1350,7 @@ def _charpoly_danilevsky_n(T, coef, row, tmp_row, n):
     return True
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True)
 def _solve_7x7(A, b, x):
     n = 7
     scale = 0.0
@@ -1385,7 +1396,7 @@ def _solve_7x7(A, b, x):
     return True
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True)
 def _fast_eigenvector_solution(lam, AM, sol, A, b, x, vals):
     # A (7, 7), b (7), x (7) and vals (8) are caller-provided scratch
     ind = (2, 3, 4, 6, 8, 9, 11, 14)
@@ -1430,7 +1441,7 @@ def _fast_eigenvector_solution(lam, AM, sol, A, b, x, vals):
     return True
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True)
 def _solver_shared_focal_relpose_6pt(d, sols, workspace):
     o = 0
     coeffs = workspace[o:o + 280]
@@ -1512,7 +1523,7 @@ def _solver_shared_focal_relpose_6pt(d, sols, workspace):
     return count
 
 
-@njit(cache=True, fastmath=True)
+@njit(cache=True)
 def _solve_shared_focal_6pt(data, sample, models, workspace):
     x1_x, x1_y, x2_x, x2_y, pp1x, pp1y, pp2x, pp2y = data
     o = 0
