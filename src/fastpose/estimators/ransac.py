@@ -35,6 +35,8 @@ import math
 import numpy as np
 from numba import njit
 
+from fastpose.kernel_cache import stabilize
+
 
 @njit(cache=True)
 def _no_refine(data, model, refined, max_error_sq, num_iterations):
@@ -45,8 +47,14 @@ def _no_refine(data, model, refined, max_error_sq, num_iterations):
 def build_ransac(solve_fn, score_fn, refine_fn, sample_size, num_params,
                  max_models, workspace_size):
     # compiles a LO-RANSAC driver specialized for one problem; the kernel
-    # functions are closure constants so numba can bind the calls statically
-    @njit
+    # functions are closure constants so numba can bind the calls statically.
+    # cache=True is what makes `fastpose-warmup` worth running: the driver is
+    # the most expensive kernel in the package. Numba keys the cache on the
+    # pickled closure cells, which both disambiguates the per-problem
+    # specializations and - via stabilize - stays the same across processes.
+    stabilize(solve_fn, score_fn, refine_fn)
+
+    @njit(cache=True)
     def driver(data, num_points, min_iterations, max_iterations, max_error_sq,
                success_prob, lo_iterations, seed):
         if seed >= 0:

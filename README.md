@@ -42,6 +42,8 @@ src/fastpose/
                    refiners/utils.py the shared factorization/jacobian machinery,
                    refiners/{fundamental,essential,varying_focal,shared_focal,
                    absolute,absolute_focal,monodepth}.py the per-problem kernels
+    kernel_cache.py  process-independent numba cache keys for the closure-
+                   specialized kernels (what makes `fastpose-warmup` stick)
     estimators/    the RANSAC engine (estimators/ransac.py) and the full pipelines
                    estimate_fundamental / estimate_relative_pose /
                    estimate_relative_pose_with_varying_focals /
@@ -308,6 +310,17 @@ The warmup command runs small synthetic estimations for every backend. Use
 `fastpose-warmup --problem fundamental` / `essential` / `absolute` /
 `absolute-focal` / `varying-focal` / `shared-focal` / `monodepth` to warm
 up only one backend (`monodepth` covers all four monodepth variants).
+
+The two engines (`estimators/ransac.py`, `refiners/lm.py`) build their
+kernels as closures, and numba keys its on-disk cache on the *pickled*
+closure cells — which by default embed a per-process uuid per kernel, so
+those keys never matched again and the two most expensive kernels were
+recompiled in every process regardless of warmup. `src/fastpose/kernel_cache.py`
+gives each kernel a uuid derived from what it is (module, qualified name and,
+recursively, the kernels it closes over) instead of when it was built, which
+makes the keys reproducible while still separating the per-problem and
+per-loss specializations. With the cache populated, a fresh process reaches
+the first `estimate_relative_pose` result in ~0.5 s instead of ~9 s.
 
 ## Usage
 

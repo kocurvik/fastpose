@@ -25,13 +25,19 @@ The returned kernel has the RANSAC refiner signature
 import numpy as np
 from numba import njit
 
+from fastpose.kernel_cache import stabilize
+
 
 def build_lm_refine(init_state, state_to_model, accumulate, apply_step, cost,
                     state_size, num_tangent, model_size):
     # compiles an LM refiner specialized for one problem; the kernels are
     # closure constants so numba can bind the calls statically (the same
-    # pattern as build_ransac in the RANSAC engine)
-    @njit(fastmath=True)
+    # pattern as build_ransac in the RANSAC engine, including the cache=True
+    # plus stabilize combination - one specialization per problem and per
+    # loss, each with its own process-independent cache key)
+    stabilize(init_state, state_to_model, accumulate, apply_step, cost)
+
+    @njit(cache=True, fastmath=True)
     def refine(data, model, refined, max_error_sq, num_iterations):
         state = np.empty(state_size)
         state_new = np.empty(state_size)
