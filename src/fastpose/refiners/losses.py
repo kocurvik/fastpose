@@ -29,6 +29,11 @@ exposing the same `weight`/`cost` njit kernels works as a Loss - refiners
 compile and cache a kernel per loss type on first use (see
 `_get_final_refine` in each refiners/*.py module), so adding a new loss
 here is enough to make it selectable everywhere.
+
+`LOSSES` maps the string names the estimator entry points accept
+('truncated', 'cauchy', 'truncated_cauchy') to these classes; `get_loss`
+resolves a name to an instance and passes non-string Loss objects through
+unchanged, so both spellings work wherever a loss is selected.
 """
 
 import math
@@ -89,3 +94,26 @@ class TruncatedCauchyLoss():
     # smooth in-threshold taper combined with TruncatedLoss's hard cutoff
     weight = staticmethod(_truncated_cauchy_weight)
     cost = staticmethod(_truncated_cauchy_cost)
+
+
+LOSSES = {
+    'truncated': TruncatedLoss,
+    'cauchy': CauchyLoss,
+    'truncated_cauchy': TruncatedCauchyLoss,
+}
+
+
+def get_loss(loss):
+    # resolve a loss name from LOSSES to a fresh instance; anything that is
+    # not a string (a Loss object, or any duck-typed weight/cost pair) is
+    # returned unchanged. Cheap - instantiating a Loss compiles nothing, the
+    # kernels are only built when a refiner closes over it
+    if not isinstance(loss, str):
+        return loss
+    try:
+        cls = LOSSES[loss]
+    except KeyError:
+        raise ValueError(
+            "unknown loss %r; expected one of %s"
+            % (loss, ", ".join(LOSSES))) from None
+    return cls()

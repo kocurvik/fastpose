@@ -21,13 +21,18 @@ local optimization minimizes the hybrid cost of the Sampson error
 error, whose threshold `max_reproj_error` sets the relative weighting
 `scale_reproj = max_error^2 / max_reproj_error^2` like poselib's
 `max_errors = [reproj, epipolar]` pair.
+
+Each entry point ends with a final refinement of the same hybrid cost on
+the RANSAC inliers only, under the robust loss named by `final_loss`
+('truncated', 'cauchy' - the default - or 'truncated_cauchy'; see
+refiners/losses.py).
 """
 
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
 from fastpose.estimators.utils import build_info, failure_info, unproject_pair
-from fastpose.refiners.losses import CauchyLoss
+from fastpose.refiners.losses import get_loss
 from fastpose.refiners.monodepth import (LMMonoDepthPoseRefiner,
                                 LMMonoDepthSharedFocalPoseRefiner,
                                 LMMonoDepthShiftPoseRefiner,
@@ -72,12 +77,14 @@ def _get_estimator(kind):
     return _estimators[kind]
 
 
-def _get_final_refiner(kind):
-    # loss for the final polish pass on RANSAC inliers only; see
-    # refiners/losses.py for the available Loss objects
-    if kind not in _final_refiners:
-        _final_refiners[kind] = _REFINER_CLS[kind](loss=CauchyLoss())
-    return _final_refiners[kind]
+def _get_final_refiner(kind, loss):
+    # refiner for the final polish pass on RANSAC inliers only; `loss` is an
+    # already-resolved Loss object (see refiners/losses.py). One refiner -
+    # and one compiled LM kernel - is cached per (problem, loss type)
+    key = (kind, type(loss))
+    if key not in _final_refiners:
+        _final_refiners[key] = _REFINER_CLS[kind](loss=loss)
+    return _final_refiners[key]
 
 
 def _monodepth_data(x1, x2, d1, d2, scale_reproj, weight_sampson):
@@ -117,7 +124,7 @@ def estimate_relative_pose_with_monodepth(
         iterations=1000, max_error=0.002, max_reproj_error=0.016,
         weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
-        final_refinement_iterations=100):
+        final_refinement_iterations=100, final_loss='cauchy'):
     # params:
     # x1, x2 - (n, 2) arrays of *calibrated* image points
     # d1, d2 - (n,) monocular depths per image (scale-invariant, or
@@ -134,9 +141,13 @@ def estimate_relative_pose_with_monodepth(
     # max_reproj_error - reprojection threshold (same units) that sets the
     #          hybrid LO weighting; None or 0 disables the reprojection term
     # weight_sampson - weight of the Sampson term in the hybrid LO cost
-    # final_refinement_iterations - LM step budget for the final Cauchy-loss
+    # final_refinement_iterations - LM step budget for the final robust-loss
     #          polish pass on the RANSAC inliers; independent of
     #          lo_iterations. Defaults to 100; 0 disables the pass
+    # final_loss - robust loss minimized by that final pass: 'truncated',
+    #          'cauchy' (default) or 'truncated_cauchy'; a Loss object from
+    #          refiners/losses.py is accepted too. The first call for a given
+    #          loss compiles its LM kernel
     # returns (model, info) with model = {'R', 't', 'scale', 'shift1',
     # 'shift2'} (scale * (d2 + shift2) * x2h = R ((d1 + shift1) * x1h) + t
     # for inliers) and info = {'inliers', 'num_inliers', 'model_score',
@@ -144,6 +155,7 @@ def estimate_relative_pose_with_monodepth(
     # identity pose with scale=1.0, shift1=shift2=0.0 and
     # info['num_inliers'] is 0
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    loss = get_loss(final_loss)
     x1, x2, max_error, max_reproj_error = unproject_pair(
         camera1, camera2, x1, x2, max_error, max_reproj_error)
     data = _monodepth_data(x1, x2, d1, d2,
@@ -173,7 +185,7 @@ def estimate_relative_pose_with_monodepth(
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
     if final_refinement_iterations != 0 and num_inliers > 0:
-        final_refiner = _get_final_refiner(kind)
+        final_refiner = _get_final_refiner(kind, loss)
         inlier_data = _monodepth_data(
             x1[inliers], x2[inliers], d1[inliers], d2[inliers],
             _scale_reproj(max_error, max_reproj_error), weight_sampson)
@@ -204,17 +216,21 @@ def estimate_shared_focal_relative_pose_with_monodepth(
         iterations=1000, max_error=2.0, max_reproj_error=16.0,
         weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
-        final_refinement_iterations=100):
+        final_refinement_iterations=100, final_loss='cauchy'):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length
     # shared by both cameras; principal_point* optional (cx, cy), zero if
     # omitted. Thresholds in pixels. final_refinement_iterations is the LM
-    # step budget for the final Cauchy-loss polish pass on the RANSAC
+    # step budget for the final robust-loss polish pass on the RANSAC
     # inliers, independent of lo_iterations; defaults to 100, 0 disables the
-    # pass. Returns (model, info) with model = {'R', 't', 'f', 'scale'} and
+    # pass. final_loss picks that pass's robust loss - 'truncated', 'cauchy'
+    # (default) or 'truncated_cauchy', or a Loss object from
+    # refiners/losses.py. Returns (model, info) with model = {'R', 't', 'f',
+    # 'scale'} and
     # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
     # 'refinements'}; on total failure model holds the identity pose with
     # f=scale=1.0 and info['num_inliers'] is 0.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    loss = get_loss(final_loss)
     x1c = x1 - _principal_point(principal_point1)
     x2c = x2 - _principal_point(principal_point2)
     data = _monodepth_data(x1c, x2c, d1, d2,
@@ -241,7 +257,7 @@ def estimate_shared_focal_relative_pose_with_monodepth(
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
     if final_refinement_iterations != 0 and num_inliers > 0:
-        final_refiner = _get_final_refiner('shared-focal')
+        final_refiner = _get_final_refiner('shared-focal', loss)
         inlier_data = _monodepth_data(
             x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
             _scale_reproj(max_error, max_reproj_error), weight_sampson)
@@ -270,17 +286,21 @@ def estimate_varying_focal_relative_pose_with_monodepth(
         iterations=1000, max_error=2.0, max_reproj_error=16.0,
         weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
-        final_refinement_iterations=100):
+        final_refinement_iterations=100, final_loss='cauchy'):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length per
     # camera; principal_point* optional (cx, cy), zero if omitted.
     # Thresholds in pixels. final_refinement_iterations is the LM step
-    # budget for the final Cauchy-loss polish pass on the RANSAC inliers,
+    # budget for the final robust-loss polish pass on the RANSAC inliers,
     # independent of lo_iterations; defaults to 100, 0 disables the pass.
+    # final_loss picks that pass's robust loss - 'truncated', 'cauchy'
+    # (default) or 'truncated_cauchy', or a Loss object from
+    # refiners/losses.py.
     # Returns (model, info) with model = {'R', 't', 'f1', 'f2', 'scale'} and
     # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
     # 'refinements'}; on total failure model holds the identity pose with
     # f1=f2=scale=1.0 and info['num_inliers'] is 0.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    loss = get_loss(final_loss)
     x1c = x1 - _principal_point(principal_point1)
     x2c = x2 - _principal_point(principal_point2)
     data = _monodepth_data(x1c, x2c, d1, d2,
@@ -309,7 +329,7 @@ def estimate_varying_focal_relative_pose_with_monodepth(
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers
     if final_refinement_iterations != 0 and num_inliers > 0:
-        final_refiner = _get_final_refiner('varying-focal')
+        final_refiner = _get_final_refiner('varying-focal', loss)
         inlier_data = _monodepth_data(
             x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
             _scale_reproj(max_error, max_reproj_error), weight_sampson)

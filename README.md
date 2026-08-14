@@ -316,7 +316,42 @@ fastpose-warmup
 The warmup command runs small synthetic estimations for every backend. Use
 `fastpose-warmup --problem fundamental` / `essential` / `absolute` /
 `absolute-focal` / `varying-focal` / `shared-focal` / `monodepth` to warm
-up only one backend (`monodepth` covers all four monodepth variants).
+up only one backend (`monodepth` covers all four monodepth variants). The
+monodepth final-refinement kernels are compiled once per `final_loss`
+(`cauchy`, `truncated_cauchy`; `truncated` reuses the local-optimization
+kernel), and the warmup drives each of them directly rather than hoping the
+synthetic RANSAC run reaches it.
+
+### Multiprocessing
+
+**Warm the cache before you fork.** Numba's on-disk cache is not safe against
+concurrent writers: `_IndexDataCacheFile.save` reads the index, picks the
+lowest free `.nbc` name, writes the index and then writes the data file, with
+no lock across those steps. Two worker processes compiling the same kernel at
+once can leave an index entry pointing at a *different* key's compiled code,
+and `load` does not check what it unpickles against the key it asked for.
+Running the wrong specialization writes past the caller's arrays, which
+surfaces as glibc `free(): invalid size` / `corrupted double-linked list`
+crashes at random points in a long run.
+
+Since the kernel cache keys are process-independent (see below), workers do
+share entries — which is what makes this reachable. So compile everything in
+the parent first:
+
+```python
+from fastpose.estimators.warmup import warmup
+
+warmup()                                # or run `fastpose-warmup` beforehand
+with multiprocessing.Pool(n) as pool:   # fork children inherit the compiled
+    ...                                 # kernels and never touch the cache
+```
+
+With the default `fork` start method the children inherit the compiled
+dispatchers in memory and never read or write the cache at all. Under `spawn`
+they re-import and load from the cache, which is safe as long as the warmup
+covered everything they use — anything it missed is compiled by every worker
+at once. The alternative, if you cannot warm up first, is to give each worker
+its own `NUMBA_CACHE_DIR` so nothing is shared.
 
 The two engines (`estimators/ransac.py`, `refiners/lm.py`) build their
 kernels as closures, and numba keys its on-disk cache on the *pickled*

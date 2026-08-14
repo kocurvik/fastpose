@@ -426,7 +426,17 @@ def _real_roots_sturm(coef, degree, chain, degs, roots, lo_stack, hi_stack,
     shi_stack[0] = _sturm_sign_changes(chain, degs, nchain, bound)
     sp = 1
     num_roots = 0
+    # callers size `roots` at `degree`, which is also the true root count -
+    # but only for an exact Sturm chain. The chain above is truncated on a
+    # nontrivial gcd (multiple roots) and its sign counts are evaluated in
+    # floating point, so near-multiple roots can make a subinterval's count
+    # exceed its parent's and the same cluster be emitted more than once.
+    # Each pass through the loop emits at most one root, so one capacity
+    # check here keeps the write in bounds for every caller.
+    max_roots = roots.shape[0]
     while sp > 0:
+        if num_roots >= max_roots:
+            break
         sp -= 1
         lo = lo_stack[sp]
         hi = hi_stack[sp]

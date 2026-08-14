@@ -30,7 +30,7 @@ import numpy as np
 from numba import njit
 
 from fastpose.refiners.lm import build_lm_refine
-from fastpose.refiners.losses import TruncatedLoss
+from fastpose.refiners.losses import TruncatedLoss, get_loss
 from fastpose.refiners.utils import mat3_mul, rodrigues
 from fastpose.scorers.sampson import essential_from_pose
 
@@ -849,11 +849,13 @@ def _get_final_refine_varying_focal(loss):
 
 class LMMonoDepthPoseRefiner():
     # calibrated monodepth: pose + scale (7 tangent parameters). `loss`
-    # selects the robust cost/weighting (TruncatedLoss by default, matching
-    # every RANSAC-internal use; pass e.g. CauchyLoss() or
-    # TruncatedCauchyLoss() for a final polish pass on an inlier-only
-    # subset).
+    # selects the robust cost/weighting, either as a Loss object or as one
+    # of the names in refiners/losses.py's LOSSES ('truncated', 'cauchy',
+    # 'truncated_cauchy'). TruncatedLoss is the default, matching every
+    # RANSAC-internal use; the others are meant for a final polish pass on
+    # an inlier-only subset.
     def __init__(self, num_iterations=25, loss=TruncatedLoss()):
+        loss = get_loss(loss)
         self.num_iterations = num_iterations
         self.loss = loss
         if not isinstance(loss, TruncatedLoss):
@@ -865,6 +867,7 @@ class LMMonoDepthPoseRefiner():
 class LMMonoDepthShiftPoseRefiner():
     # calibrated monodepth: pose + scale + both shifts (9 tangent parameters)
     def __init__(self, num_iterations=25, loss=TruncatedLoss()):
+        loss = get_loss(loss)
         self.num_iterations = num_iterations
         self.loss = loss
         if not isinstance(loss, TruncatedLoss):
@@ -876,6 +879,7 @@ class LMMonoDepthShiftPoseRefiner():
 class LMMonoDepthSharedFocalPoseRefiner():
     # monodepth pose + scale + shared focal (8 tangent parameters)
     def __init__(self, num_iterations=25, loss=TruncatedLoss()):
+        loss = get_loss(loss)
         self.num_iterations = num_iterations
         self.loss = loss
         if not isinstance(loss, TruncatedLoss):
@@ -887,6 +891,7 @@ class LMMonoDepthSharedFocalPoseRefiner():
 class LMMonoDepthVaryingFocalPoseRefiner():
     # monodepth pose + scale + two focals (9 tangent parameters)
     def __init__(self, num_iterations=25, loss=TruncatedLoss()):
+        loss = get_loss(loss)
         self.num_iterations = num_iterations
         self.loss = loss
         if not isinstance(loss, TruncatedLoss):
