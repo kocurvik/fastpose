@@ -5,6 +5,15 @@ import math
 import numpy as np
 
 
+def check_min_points(n, min_points):
+    # guards against calling a minimal solver with fewer correspondences than
+    # its sample_size; raises early instead of letting the RANSAC driver draw
+    # a sample it can never fill
+    if n < min_points:
+        raise ValueError(
+            f"at least {min_points} point correspondences are required, got {n}")
+
+
 def build_info(inliers, num_inliers, score, iterations, refined):
     # the `info` half of an estimator's (model, info) return: inliers is a
     # boolean mask over the input correspondences, model_score the scorer's

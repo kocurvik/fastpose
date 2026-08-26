@@ -31,7 +31,8 @@ refiners/losses.py).
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import build_info, failure_info, unproject_pair
+from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
+                                       unproject_pair)
 from fastpose.refiners.losses import get_loss
 from fastpose.refiners.monodepth import (LMMonoDepthPoseRefiner,
                                 LMMonoDepthSharedFocalPoseRefiner,
@@ -155,6 +156,8 @@ def estimate_relative_pose_with_monodepth(
     # identity pose with scale=1.0, shift1=shift2=0.0 and
     # info['num_inliers'] is 0
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    solver_cls = MonoDepthShiftSolver if estimate_shift else MonoDepthP3PSolver
+    check_min_points(len(x1), solver_cls.sample_size)
     loss = get_loss(final_loss)
     x1, x2, max_error, max_reproj_error = unproject_pair(
         camera1, camera2, x1, x2, max_error, max_reproj_error)
@@ -230,6 +233,7 @@ def estimate_shared_focal_relative_pose_with_monodepth(
     # 'refinements'}; on total failure model holds the identity pose with
     # f=scale=1.0 and info['num_inliers'] is 0.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    check_min_points(len(x1), MonoDepthSharedFocalSolver.sample_size)
     loss = get_loss(final_loss)
     x1c = x1 - _principal_point(principal_point1)
     x2c = x2 - _principal_point(principal_point2)
@@ -300,6 +304,7 @@ def estimate_varying_focal_relative_pose_with_monodepth(
     # 'refinements'}; on total failure model holds the identity pose with
     # f1=f2=scale=1.0 and info['num_inliers'] is 0.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
+    check_min_points(len(x1), MonoDepthVaryingFocalSolver.sample_size)
     loss = get_loss(final_loss)
     x1c = x1 - _principal_point(principal_point1)
     x2c = x2 - _principal_point(principal_point2)

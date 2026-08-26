@@ -5,7 +5,7 @@ direct pose + log-focal LM refiner."""
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import build_info, failure_info
+from fastpose.estimators.utils import build_info, check_min_points, failure_info
 from fastpose.refiners.absolute_focal import LMAbsolutePoseFocalRefiner
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.reprojection import FocalReprojectionScorer
@@ -54,6 +54,7 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
     # info['num_inliers'] is 0
     x = np.ascontiguousarray(x, dtype=np.float64)
     X = np.ascontiguousarray(X, dtype=np.float64)
+    check_min_points(len(x), P4PFSolver.sample_size)
     if principal_point is not None:
         pp = np.asarray(principal_point, dtype=np.float64)
         if pp.shape != (2,):

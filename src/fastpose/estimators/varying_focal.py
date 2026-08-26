@@ -3,7 +3,8 @@
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import build_info, failure_info, normalize_points
+from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
+                                       normalize_points)
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.varying_focal import LMVaryingFocalPoseRefiner
 from fastpose.scorers.sampson import VaryingFocalPoseSampsonScorer
@@ -71,6 +72,7 @@ def estimate_relative_pose_with_varying_focals(
     # f1=f2=1.0 and info['num_inliers'] is 0.
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
+    check_min_points(len(x1), SevenPointVaryingFocalSolver.sample_size)
     pp1 = _principal_point(principal_point1)
     pp2 = _principal_point(principal_point2)
 

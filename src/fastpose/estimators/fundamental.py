@@ -7,7 +7,7 @@ for benchmarking.
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import (build_info, failure_info,
+from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
                                        normalize_points, point_columns)
 from fastpose.refiners.fundamental import LMFundamentalRefiner
 from fastpose.refiners.losses import CauchyLoss
@@ -17,6 +17,7 @@ from fastpose.solvers.fundamental import SevenPointSolver, seven_point
 
 def estimate_fundamental_numpy(x1, x2, iterations=1000, max_error=2.0, seed=4578):
     # pure-numpy reference RANSAC (no local optimization)
+    check_min_points(len(x1), SevenPointSolver.sample_size)
     x1n, x2n, T, scale = normalize_points(x1, x2)
     threshold = max_error * scale
     best_score = np.inf
@@ -81,6 +82,7 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
     # info['num_inliers'] is 0
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
+    check_min_points(len(x1), SevenPointSolver.sample_size)
     x1n, x2n, T, scale = normalize_points(x1, x2)
     data = point_columns(x1n, x2n)
 

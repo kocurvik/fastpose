@@ -4,8 +4,8 @@ al.), truncated reprojection scorer and direct pose LM refiner."""
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import (build_info, camera_focal, failure_info,
-                                       unproject_points)
+from fastpose.estimators.utils import (build_info, camera_focal, check_min_points,
+                                       failure_info, unproject_points)
 from fastpose.refiners.absolute import LMAbsolutePoseRefiner
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.reprojection import ReprojectionScorer
@@ -62,6 +62,7 @@ def estimate_absolute_pose(x, X, camera=None, iterations=1000, max_error=0.002,
     # holds the identity pose and info['num_inliers'] is 0
     x = np.ascontiguousarray(x, dtype=np.float64)
     X = np.ascontiguousarray(X, dtype=np.float64)
+    check_min_points(len(x), P3PSolver.sample_size)
     if camera is not None:
         x = unproject_points(camera, x)
         max_error = max_error / camera_focal(camera)

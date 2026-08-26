@@ -9,8 +9,8 @@ benchmark).
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import (build_info, failure_info, point_columns,
-                                       unproject_pair)
+from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
+                                       point_columns, unproject_pair)
 from fastpose.refiners.essential import LMEssentialRefiner
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.sampson import PoseSampsonScorer
@@ -61,6 +61,7 @@ def estimate_relative_pose(x1, x2, camera1=None, camera2=None, iterations=1000,
     # identity pose and info['num_inliers'] is 0
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
+    check_min_points(len(x1), FivePointSolver.sample_size)
     x1, x2, max_error = unproject_pair(camera1, camera2, x1, x2, max_error)
     data = point_columns(x1, x2)
 
