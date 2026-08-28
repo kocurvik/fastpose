@@ -17,6 +17,34 @@ which file implements what).
 }
 ```
 
+## LO-RANSAC
+
+The framework is based on:
+
+```bibtex
+@inproceedings{chum2003locally,
+  title={Locally optimized RANSAC},
+  author={Chum, Ond{\v{r}}ej and Matas, Ji{\v{r}}{\'\i} and Kittler, Josef},
+  booktitle={Joint pattern recognition symposium},
+  pages={236--243},
+  year={2003},
+  organization={Springer}
+}
+```
+
+and its improved version:
+
+```bibtex
+@inproceedings{chum2003locally,
+  title={Locally optimized RANSAC},
+  author={Chum, Ond{\v{r}}ej and Matas, Ji{\v{r}}{\'\i} and Kittler, Josef},
+  booktitle={Joint pattern recognition symposium},
+  pages={236--243},
+  year={2003},
+  organization={Springer}
+}
+```
+
 ## Fundamental matrix (7-point)
 
 Hartley-style isotropic point normalization used for numerical conditioning:
