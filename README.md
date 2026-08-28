@@ -1,29 +1,155 @@
 # fastpose
 
-Proof of concept for a fast Python-based backend for robust relative pose estimation,
-benchmarked against [PoseLib](https://github.com/PoseLib/PoseLib) (C++). Implements
-fundamental matrix estimation (7-point solver) and calibrated relative pose /
-essential matrix estimation (5-point solver) inside a shared LO-RANSAC engine with
-truncated Sampson (MSAC) scoring.
+A fast Python backend for robust camera pose estimation inspired by [PoseLib](https://github.com/PoseLib/PoseLib). 
+This package was mostly vibe-coded using Claude Code.
+Fundamental/essential
+matrix, calibrated and uncalibrated relative pose (including shared- and
+varying-focal variants), absolute pose (P3P/P4Pf), and monocular-depth-assisted
+relative pose — all built on one [numba](https://numba.pydata.org/)-compiled
+LO-RANSAC engine and benchmarked against PoseLib (C++).
+
+On synthetic data, fastpose matches or beats PoseLib's runtime while landing
+similar or better accuracy; see [BENCHMARKS.md](TESTS) to reproduce
+this and for tests. Real-data numbers are coming later.
+
+## Install
+
+From the repository root:
+
+```
+pip install .
+```
+
+Dependencies are just `numpy` and `numba`.
+
+Numba compiles kernels lazily on first use, which makes the very first call to
+each `estimate_*` function slow (a few seconds). To compile everything up
+front, run:
+
+```
+fastpose-warmup
+```
+
+Use `fastpose-warmup --problem fundamental` / `essential` / `absolute` /
+`absolute-focal` / `varying-focal` / `shared-focal` / `monodepth` to warm up
+only one backend (`monodepth` covers all four monodepth variants). Note that the warmup may take several minutes.
+
+### Multiprocessing
+
+**Warm the cache before you fork.** Numba's on-disk kernel cache is not safe
+against concurrent writers, and two worker processes JIT-compiling the same
+kernel at once can corrupt it. Always compile in the parent first:
+
+```python
+from fastpose.estimators.warmup import warmup
+
+warmup()                                # or run `fastpose-warmup` beforehand
+with multiprocessing.Pool(n) as pool:   # fork children inherit the compiled
+    ...                                 # kernels and never touch the cache
+```
+
+With the default `fork` start method the children inherit the compiled
+dispatchers in memory and never read or write the cache at all, so this is
+usually all you need. Under `spawn`, workers re-import and load from the
+cache, which is safe as long as the warmup covered everything they use. If you
+cannot warm up first, give each worker its own `NUMBA_CACHE_DIR` instead.
+
+## Usage
+
+Every `estimate_*` function takes correspondence arrays plus RANSAC options
+(`iterations`, `max_error`, `min_iterations` for adaptive termination,
+`lo_iterations` for the local-optimization budget, `seed`) and returns
+`(model, info)`:
+
+- `model` is a dict holding the estimated quantities — `R`/`t` for pose
+  problems, `F` for the fundamental matrix, plus `f`/`f1`/`f2` for the
+  unknown-focal variants and `scale`/`shift1`/`shift2` for the monodepth ones.
+  On total failure (`info['num_inliers'] == 0`) `model` holds a generic
+  identity/placeholder result instead of a fit.
+- `info` is a dict with `inliers` (boolean mask), `num_inliers`,
+  `model_score` (the scorer's truncated score), `iterations` (RANSAC samples
+  drawn) and `refinements` (whether the post-RANSAC polish pass ran and was
+  adopted).
+
+```python
+import numpy as np
+from fastpose.estimators import estimate_fundamental, estimate_relative_pose, estimate_absolute_pose
+
+# fundamental matrix (7-point): x1, x2 are pixel coordinates
+model, info = estimate_fundamental(x1, x2, iterations=1000, max_error=2.0)
+F = model['F']
+
+# calibrated relative pose (5-point): x1, x2 are normalized (x - c) / f,
+# or pass camera1/camera2 (3x3 K, or a poselib.Camera) to pass pixel points
+# directly and have them unprojected for you
+model, info = estimate_relative_pose(x1, x2, camera1=K1, camera2=K2,
+                                      iterations=1000, max_error=2.0)
+R, t = model['R'], model['t']
+
+# absolute pose (P3P): x is normalized image points, X the 3D points
+model, info = estimate_absolute_pose(x, X, iterations=1000, max_error=2.0 / focal)
+R, t = model['R'], model['t']
+```
+
+### API reference
+
+All functions live under `fastpose.estimators` and are re-exported from
+`fastpose`. `min pts` is the minimal-sample size — calling with fewer
+correspondences raises `ValueError`.
+
+| Function | Input | `model` keys | min pts |
+|---|---|---|---|
+| `estimate_fundamental` | `x1, x2` pixel coords | `F` | 7 |
+| `estimate_relative_pose` | `x1, x2` calibrated (or pixel + `camera1`/`camera2`) | `R, t` | 5 |
+| `estimate_relative_pose_with_varying_focals` | `x1, x2` pixel coords, optional `principal_point1`/`2` | `R, t, f1, f2` | 7 |
+| `estimate_relative_pose_with_shared_focal` | `x1, x2` pixel coords, optional `principal_point1`/`2` | `R, t, f` | 6 |
+| `estimate_absolute_pose` | `x` calibrated (or pixel + `camera`), `X` 3D points | `R, t` | 3 |
+| `estimate_absolute_pose_with_focal` | `x` pixel coords, `X` 3D points, optional `principal_point` | `R, t, f` | 4 |
+| `estimate_relative_pose_with_monodepth` | `x1, x2` calibrated, `d1, d2` per-point depths | `R, t, scale, shift1, shift2` | 3 |
+| `estimate_shared_focal_relative_pose_with_monodepth` | `x1, x2` pixel coords, `d1, d2` depths, optional `principal_point1`/`2` | `R, t, f, scale` | 3 |
+| `estimate_varying_focal_relative_pose_with_monodepth` | `x1, x2` pixel coords, `d1, d2` depths, optional `principal_point1`/`2` | `R, t, f1, f2, scale` | 3 |
+
+The `# params:` comment at the top of each function in
+`src/fastpose/estimators/` documents every argument and exact input units
+(several take normalized/calibrated points rather than pixels — see the
+docstrings if you're not passing a `camera`). Every relative/absolute-pose
+function also accepts a `final_refinement_iterations` argument: an LM step
+budget for a final robust-loss polish pass over the RANSAC inliers (defaults
+to 100 iterations; 0 disables it), independent of `lo_iterations`. 
+The uncalibrated solvers assume principals at origina if they are not provided as optional params.
+
+`motion_from_essential` (also exported from `fastpose.estimators`) decomposes
+an externally estimated essential matrix into `(R, t)` candidates, for cases
+where you already have `E`/`F` from elsewhere.
 
 ## Architecture
 
-The engine (`src/fastpose/estimators/ransac.py`) is problem-agnostic LO-RANSAC compiled with
-numba. A camera pose problem plugs in three components, each a thin class wrapping
-a numba kernel with a fixed signature:
+The engine (`src/fastpose/estimators/ransac.py`) is a problem-agnostic
+LO-RANSAC compiled with numba. A camera pose problem plugs in three
+components, each a thin class wrapping a numba kernel with a fixed signature:
 
 - **Solver** (`src/fastpose/solvers/`) — minimal solver:
   `solve(data, sample, models, workspace) -> num_models`
   plus metadata (`sample_size`, `num_params`, `max_models`, `workspace_size`).
 - **Scorer** (`src/fastpose/scorers/`) — truncated robust score:
   `score(model, data, max_error_sq, best_score) -> (score, num_inliers)`.
-- **Refiner** (`src/fastpose/refiners/`, optional) — non-minimal refit for local optimization:
-  `refine(data, model, refined, max_error_sq, num_iterations) -> success`.
+- **Refiner** (`src/fastpose/refiners/`, optional) — non-minimal refit for local
+  optimization: `refine(data, model, refined, max_error_sq, num_iterations) -> success`.
 
 `data` is an opaque tuple of contiguous arrays chosen by the problem (for F:
 four coordinate columns, SIMD-friendly). The engine handles sampling, model
-selection, local optimization, final refinement and adaptive termination, and is
-specialized per problem by `RansacEstimator(solver, scorer, refiner)`.
+selection, local optimization, final refinement and adaptive termination, and
+is specialized per problem by `RansacEstimator(solver, scorer, refiner)`.
+Adding a new problem means writing the three kernels and their wrapper — the
+RANSAC loop is reused unchanged; the 5-point problem shares the Sampson
+scorer verbatim with the 7-point one and only adds a solver and a refiner.
+
+`src/fastpose/refiners/lm.py` contains a shared Levenberg-Marquardt loop
+(damping schedule, damped normal equations, accept/reject, convergence),
+compiled per problem via the same closure specialization. A refinement
+problem only defines four small kernels over a flat state vector:
+`init_state`, `state_to_model`, `accumulate` (residuals + jacobian -> normal
+equations) and `apply_step` (retraction).
 
 ### Layout
 
@@ -45,13 +171,8 @@ src/fastpose/
     kernel_cache.py  process-independent numba cache keys for the closure-
                    specialized kernels (what makes `fastpose-warmup` stick)
     estimators/    the RANSAC engine (estimators/ransac.py) and the full pipelines
-                   estimate_fundamental / estimate_relative_pose /
-                   estimate_relative_pose_with_varying_focals /
-                   estimate_relative_pose_with_shared_focal /
-                   estimate_absolute_pose / estimate_absolute_pose_with_focal /
-                   estimate_relative_pose_with_monodepth /
-                   estimate_{shared,varying}_focal_relative_pose_with_monodepth;
-                   shared helpers in estimators/utils.py
+                   listed in the API reference above; shared helpers in
+                   estimators/utils.py
 benchmarks/    benchmarks/estimators compares against poselib (mAA + runtime
                scaling); benchmarks/solvers evaluates solver accuracy on
                synthetic noise-free minimal samples; shared metrics, data
@@ -60,173 +181,108 @@ tests/         finite-difference checks of the refiner jacobians (tests/jac)
                and end-to-end estimator tests on synthetic scenes
 ```
 
-All four subpackages are only reachable through `fastpose` (e.g.
-`from fastpose.solvers import p3p` or `from fastpose import estimators`) —
+All four subpackages (`solvers`, `scorers`, `refiners`, `estimators`) are only
+reachable through `fastpose` (e.g. `from fastpose.solvers import p3p`) —
 `import solvers` / `import estimators` etc. directly is not supported.
 
-Adding a new problem (P3P, ...) means writing the three kernels and their wrapper —
-the RANSAC loop is reused unchanged. The 5-point problem demonstrates the reuse:
-it shares the Sampson scorer verbatim and only adds a solver and a refiner.
+## Backend notes
 
-### Shared LM refiner engine
+Technical detail on each backend's solver/scorer/refiner, for anyone
+extending fastpose or curious how a specific number is computed.
 
-`src/fastpose/refiners/lm.py` contains the Levenberg-Marquardt loop itself (damping schedule,
-damped normal equations, accept/reject, convergence) once, compiled per problem
-via closure specialization like the RANSAC driver. A refinement problem only
-defines four small kernels over a flat state vector: `init_state` (model →
-state), `state_to_model` (state → model), `accumulate` (residuals + jacobian →
-normal equations) and `apply_step` (retraction). Both epipolar refiners share
-the Sampson jacobian accumulation from `src/fastpose/refiners/utils.py`; the fundamental
-refiner optimizes the factorized state `F = U diag(1, sigma, 0) V^T` (7 tangent
-parameters), the essential refiner optimizes the pose `[R | t]` directly
-(5 tangent parameters: rotation + translation direction on the unit sphere).
+<details>
+<summary>Fundamental matrix (7-point)</summary>
 
-## Fundamental matrix backend
+- **7-point nullspace via Gaussian elimination** with partial pivoting instead
+  of a LAPACK SVD call — much faster for a 7x9 matrix.
+- **Closed-form cubic solver** (Cardano/trigonometric + one Newton polish
+  step) for the determinant constraint instead of `np.roots`'
+  companion-matrix eigendecomposition.
+- **Fused single-pass MSAC scoring** with an exact early bail-out: the
+  truncated score only grows, so scoring stops as soon as the partial score
+  exceeds the best score so far (checked per 512-point chunk to keep the loop
+  SIMD-vectorized).
+- **LO-RANSAC with Levenberg-Marquardt**: whenever a new best model is found,
+  LM minimizes the truncated Sampson error over its inliers, with F
+  parametrized by its SVD factorization `F = U diag(1, sigma, 0) V^T` (7
+  tangent parameters: two rotation updates + sigma), analogous to poselib's
+  `FactorizedFundamentalMatrix`. Rank 2 holds by construction; a final
+  refinement runs after the loop.
+- **Hartley-style normalization** (single shared isotropic transform,
+  threshold scaled accordingly) for numerical conditioning on pixel
+  coordinates.
+- Optional adaptive termination (`min_iterations < iterations`) with the
+  standard inlier-ratio-based iteration bound.
 
-- **7-point nullspace via Gaussian elimination** with partial pivoting instead of a
-  LAPACK SVD call — much faster for a 7×9 matrix.
-- **Closed-form cubic solver** (Cardano/trigonometric + one Newton polish step) for
-  the determinant constraint instead of `np.roots`' companion-matrix eigendecomposition.
-- **Fused single-pass MSAC scoring** with an exact early bail-out: the truncated score
-  only grows, so scoring stops as soon as the partial score exceeds the best score so
-  far (checked per 512-point chunk to keep the loop SIMD-vectorized). This is what
-  keeps scoring cheap for dense matchers with many correspondences.
-- **LO-RANSAC with Levenberg-Marquardt**: whenever a new best model is found, LM
-  minimizes the truncated Sampson error over its inliers, with F parametrized by
-  its SVD factorization `F = U diag(1, sigma, 0) V^T` (7 tangent parameters: two
-  rotation updates + sigma), analogous to poselib's `FactorizedFundamentalMatrix`.
-  Rank 2 holds by construction; a final refinement runs after the loop.
-- **Hartley-style normalization** (single shared isotropic transform, threshold scaled
-  accordingly) for numerical conditioning on pixel coordinates.
-- Optional adaptive termination (`min_iterations < iterations`) with the standard
-  inlier-ratio-based iteration bound.
+</details>
 
-## Benchmark
+<details>
+<summary>Calibrated relative pose (5-point)</summary>
 
-Synthetic pixel-scale correspondences (1000×1000 image, 1 px noise, 20% outliers),
-1000 fixed RANSAC iterations, 2 px Sampson threshold, best of 5 runs
-(Windows, Python 3.10, numba 0.65):
+`src/fastpose/solvers/essential.py` + `src/fastpose/refiners/essential.py`:
 
-| matches | numpy   | numba    | numba+LO | poselib | speedup vs poselib |
-|--------:|--------:|---------:|---------:|--------:|-------------------:|
-|   1 000 | 0.252 s | 0.0050 s | 0.0053 s | 0.019 s | 3.5× |
-|  10 000 | —       | 0.023 s  | 0.026 s  | 0.248 s | 9.5× |
-|  50 000 | —       | 0.117 s  | 0.137 s  | 1.125 s | 8.2× |
-
-Local optimization costs little (it only runs when a new best model is found)
-and pays off on harder data — with 2 px noise and 40% outliers (2000 matches,
-same seeds): plain RANSAC 638–1165 inliers, LO-RANSAC 896–1183, poselib
-509–1025.
-
-## 5-point relative pose backend
-
-`src/fastpose/solvers/essential.py` + `src/fastpose/refiners/essential.py` add calibrated relative pose
-estimation on the same engine:
-
-- **Stewénius-style 5-point solver**: 4-dimensional nullspace by Gaussian
-  elimination + Gram-Schmidt, the ten cubic constraints expanded into a 10×20
-  matrix via precomputed monomial multiplication tables, Gauss-Jordan reduction
-  and the 10×10 action matrix. Real eigenvalues are extracted the way poselib
-  does it — characteristic polynomial via Danilevsky's method, Sturm-sequence
-  bracketing with bisection + Newton polish — because LAPACK's nonsymmetric
-  eigensolver is not available inside numba kernels.
+- **Stewenius-style 5-point solver**: 4-dimensional nullspace by Gaussian
+  elimination + Gram-Schmidt, the ten cubic constraints expanded into a
+  10x20 matrix via precomputed monomial multiplication tables, Gauss-Jordan
+  reduction and the 10x10 action matrix. Real eigenvalues are extracted the
+  way poselib does it — characteristic polynomial via Danilevsky's method,
+  Sturm-sequence bracketing with bisection + Newton polish — because
+  LAPACK's nonsymmetric eigensolver is not available inside numba kernels.
 - **Direct pose output with cheirality check**: each E candidate is decomposed
-  inside the solver kernel into the (R, t) candidate with the best cheirality
-  count on the minimal sample, so RANSAC models are poses `[R | t]` (12 flat
-  parameters) and the estimator returns (R, t) directly — no post-hoc
-  `motion_from_essential` on the winning model.
+  inside the solver kernel into the (R, t) candidate with the best
+  cheirality count on the minimal sample, so RANSAC models are poses
+  `[R | t]` (12 flat parameters) and the estimator returns (R, t) directly —
+  no post-hoc `motion_from_essential` on the winning model.
 - **Pose Sampson scorer**: the same truncated Sampson form as for F, with
   `E = [t]_x R` assembled on the fly from the pose model.
 - **LM refiner on the pose directly**: 5 tangent parameters — a minimal,
   gauge-free parametrization of the essential manifold — 3 for the rotation
   update `R exp([w]_x)` and 2 for the translation direction in an orthonormal
-  basis of the plane orthogonal to t, retracted back to the unit sphere. Reuses
-  the shared LM engine and Sampson jacobian accumulation from `src/fastpose/refiners/`.
+  basis of the plane orthogonal to t, retracted back to the unit sphere.
 - `motion_from_essential` is kept for decomposing externally estimated E/F
   matrices (used by the fundamental matrix benchmark).
 
-Benchmark (same protocol; 20% outliers, 1 px noise, f = 1000 px, 2 px threshold,
-timing includes pose decomposition; poselib `estimate_relative_pose` with PINHOLE
-cameras):
+(The 5-point solver is ~10x more expensive per iteration than the 7-point
+one, so its advantage at small n is smaller; scoring still dominates for
+dense matches. Inlier counts are not directly comparable to poselib for this
+problem since poselib additionally applies cheirality filtering during
+scoring.)
 
-| matches | numba    | numba+LO | poselib | speedup vs poselib | rot err (LO / poselib) |
-|--------:|---------:|---------:|--------:|-------------------:|-----------------------:|
-|   1 000 | 0.023 s  | 0.024 s  | 0.027 s | 1.1× | 0.021° / 0.036° |
-|  10 000 | 0.076 s  | 0.078 s  | 0.213 s | 2.7× | 0.008° / 0.015° |
-|  50 000 | 0.302 s  | 0.342 s  | 1.178 s | 3.4× | 0.003° / 0.004° |
+</details>
 
-(The 5-point solver is ~10× more expensive per iteration than the 7-point one,
-so the advantage at small n is smaller; scoring still dominates for dense
-matches. Inlier counts are not directly comparable to poselib for this problem
-since poselib additionally applies cheirality filtering during scoring.)
-
-## Varying-focal relative pose backend
+<details>
+<summary>Varying-focal relative pose</summary>
 
 `estimate_relative_pose_with_varying_focals` estimates relative pose plus two
-unknown focal lengths from pixel correspondences with known principal points,
-on the same engine:
+unknown focal lengths from pixel correspondences with known principal
+points:
 
-- **Minimal solver** (`src/fastpose/solvers/varying_focal.py`): standard 7-point fundamental
-  matrix hypotheses, focal lengths from the Bougnoux formula (square pixels,
-  known principal points), then E = K2^T F K1 decomposed with the shared
-  closed-form essential decomposition and cheirality check into pose models
-  `[R | t | f1 | f2]` (14 flat parameters).
+- **Minimal solver** (`src/fastpose/solvers/varying_focal.py`): standard
+  7-point fundamental matrix hypotheses, focal lengths from the Bougnoux
+  formula (square pixels, known principal points), then E = K2^T F K1
+  decomposed with the shared closed-form essential decomposition and
+  cheirality check into pose models `[R | t | f1 | f2]` (14 flat
+  parameters).
 - **Scorer**: the truncated Sampson error of the induced fundamental matrix
   F = K2^-T E K1^-1, evaluated in the original pixel coordinates.
-- **LM refiner** (`src/fastpose/refiners/varying_focal.py`): 7 tangent parameters — rotation
-  (3), translation direction (2) and the two log-focals — with the Sampson
-  jacobian built from a central-difference tangent basis of the induced F.
+- **LM refiner** (`src/fastpose/refiners/varying_focal.py`): 7 tangent
+  parameters — rotation (3), translation direction (2) and the two
+  log-focals — with the Sampson jacobian built from a central-difference
+  tangent basis of the induced F.
 - Hypotheses whose Bougnoux focal estimates are non-positive are rejected
   inside the solver.
 
-## Absolute pose (P3P) backend
+</details>
 
-`estimate_absolute_pose` estimates the pose `[R | t]` (with
-`lambda * (x, y, 1) = R X + t`) from calibrated 2D-3D correspondences:
-
-- **P3P solver of Ding et al.** (`src/fastpose/solvers/p3p.py`, "Revisiting the P3P
-  Problem", CVPR 2023), ported from poselib's `p3p.cc`: the three
-  correspondences reduce to a single cubic; the rank-2 conic pencil splits
-  into two lines, each giving a quadratic in a depth ratio, and the depths
-  are polished with a few Newton steps before the pose is assembled — no
-  eigendecomposition anywhere.
-- **Truncated reprojection scorer** (`src/fastpose/scorers/reprojection.py`): fused MSAC
-  scoring with the same exact per-chunk early bail-out as the Sampson
-  scorers; the inlier test is division-free and points behind the camera
-  count as outliers.
-- **LM refiner on the pose directly** (`src/fastpose/refiners/absolute.py`): 6 tangent
-  parameters (rotation update `R exp([w]_x)` + translation) with an analytic
-  reprojection jacobian, on the shared LM engine.
-
-## Absolute pose with unknown focal (P4Pf) backend
-
-`estimate_absolute_pose_with_focal` estimates `[R | t | f]` from 2D-3D
-correspondences in pixel coordinates (square pixels, known principal point):
-
-- **P4Pf solver** (`src/fastpose/solvers/p4pf.py`), a port of poselib's `p4pf.cc` +
-  `re3q3.cc`: the first two camera rows are parametrized by the 4-dimensional
-  nullspace of the eight cross-product constraints — computed by Gaussian
-  elimination + modified Gram-Schmidt like the 5-point nullspace (no LAPACK
-  SVD) — the third row follows linearly, and the three rotation-orthogonality
-  constraints form a 3Q3 system reduced to a degree-8 determinant polynomial
-  solved with the shared Sturm machinery. Candidates are cheirality-checked
-  on the sample, the solution closest to square pixels is kept, and R is
-  snapped back onto SO(3) via a quaternion round-trip (as poselib does by
-  storing poses as quaternions).
-- **Truncated focal reprojection scorer** (`src/fastpose/scorers/reprojection.py`): the
-  `[R | t]` scorer with the focal folded into the projection, same
-  division-free inlier test and per-chunk early bail-out.
-- **LM refiner** (`src/fastpose/refiners/absolute_focal.py`): 7 tangent parameters
-  (rotation, translation, log-focal) with an analytic jacobian.
-
-## Shared-focal relative pose backend
+<details>
+<summary>Shared-focal relative pose</summary>
 
 `estimate_relative_pose_with_shared_focal` estimates relative pose plus one
 focal length shared by both cameras from pixel correspondences with known
 principal points:
 
-- **6-point minimal solver** (`src/fastpose/solvers/shared_focal.py`), a port of
-  poselib's `relpose_6pt_focal.cc`: 3-dimensional nullspace by Gaussian
+- **6-point minimal solver** (`src/fastpose/solvers/shared_focal.py`), a port
+  of poselib's `relpose_6pt_focal.cc`: 3-dimensional nullspace by Gaussian
   elimination + Gram-Schmidt, mixed by a fixed rotation because the
   pregenerated elimination template is only valid for a generic nullspace
   basis; the upstream 31x31 elimination template (solved as one augmented
@@ -236,29 +292,80 @@ principal points:
   closed-form essential decomposition and cheirality check into pose models
   `[R | t | f | f]` (14 flat parameters, varying-focal layout).
 - **Scorer**: the varying-focal truncated Sampson scorer reused verbatim.
-- **LM refiner** (`src/fastpose/refiners/shared_focal.py`): 6 tangent parameters —
-  rotation (3), translation direction (2) and one shared log-focal — with
-  the Sampson jacobian built like the varying-focal refiner.
+- **LM refiner** (`src/fastpose/refiners/shared_focal.py`): 6 tangent
+  parameters — rotation (3), translation direction (2) and one shared
+  log-focal — with the Sampson jacobian built like the varying-focal
+  refiner.
 - The solver is the one module compiled **without** `fastmath`: its
-  action-matrix/characteristic-polynomial chain is ill-conditioned enough that
-  allowing reassociation made the recovered focal depend on whether the kernels
-  were freshly compiled or loaded from the numba cache (~1e-8 relative, never
-  enough to move an inlier count). Disabling it costs no measurable runtime and
-  makes the solver bit-reproducible; the shared scorer and LM engine keep
-  `fastmath`, where it does pay.
+  action-matrix/characteristic-polynomial chain is ill-conditioned enough
+  that allowing reassociation made the recovered focal depend on whether the
+  kernels were freshly compiled or loaded from the numba cache (~1e-8
+  relative, never enough to move an inlier count). Disabling it costs no
+  measurable runtime and makes the solver bit-reproducible; the shared
+  scorer and LM engine keep `fastmath`, where it does pay.
 
-## Monodepth relative pose backends
+</details>
 
-Relative pose from correspondences plus per-image monocular depth
-estimates (scale- or affine-invariant MDE outputs), following poselib's
-monodepth estimators. The depth convention is poselib's
-`MonoDepthTwoViewGeometry`: the 3D point of correspondence i is
-`(d1_i + shift1) x1h_i` in camera 1 and `scale (d2_i + shift2) x2h_i` in
-camera 2. Four 3-point minimal solvers (`src/fastpose/solvers/monodepth.py`):
+<details>
+<summary>Absolute pose (P3P)</summary>
+
+`estimate_absolute_pose` estimates the pose `[R | t]` (with
+`lambda * (x, y, 1) = R X + t`) from calibrated 2D-3D correspondences:
+
+- **P3P solver of Ding et al.** (`src/fastpose/solvers/p3p.py`, "Revisiting
+  the P3P Problem", CVPR 2023), ported from poselib's `p3p.cc`: the three
+  correspondences reduce to a single cubic; the rank-2 conic pencil splits
+  into two lines, each giving a quadratic in a depth ratio, and the depths
+  are polished with a few Newton steps before the pose is assembled — no
+  eigendecomposition anywhere.
+- **Truncated reprojection scorer** (`src/fastpose/scorers/reprojection.py`):
+  fused MSAC scoring with the same exact per-chunk early bail-out as the
+  Sampson scorers; the inlier test is division-free and points behind the
+  camera count as outliers.
+- **LM refiner on the pose directly** (`src/fastpose/refiners/absolute.py`):
+  6 tangent parameters (rotation update `R exp([w]_x)` + translation) with an
+  analytic reprojection jacobian, on the shared LM engine.
+
+</details>
+
+<details>
+<summary>Absolute pose with unknown focal (P4Pf)</summary>
+
+`estimate_absolute_pose_with_focal` estimates `[R | t | f]` from 2D-3D
+correspondences in pixel coordinates (square pixels, known principal point):
+
+- **P4Pf solver** (`src/fastpose/solvers/p4pf.py`), a port of poselib's
+  `p4pf.cc` + `re3q3.cc`: the first two camera rows are parametrized by the
+  4-dimensional nullspace of the eight cross-product constraints — computed
+  by Gaussian elimination + modified Gram-Schmidt like the 5-point nullspace
+  (no LAPACK SVD) — the third row follows linearly, and the three
+  rotation-orthogonality constraints form a 3Q3 system reduced to a degree-8
+  determinant polynomial solved with the shared Sturm machinery. Candidates
+  are cheirality-checked on the sample, the solution closest to square
+  pixels is kept, and R is snapped back onto SO(3) via a quaternion
+  round-trip (as poselib does by storing poses as quaternions).
+- **Truncated focal reprojection scorer**
+  (`src/fastpose/scorers/reprojection.py`): the `[R | t]` scorer with the
+  focal folded into the projection, same division-free inlier test and
+  per-chunk early bail-out.
+- **LM refiner** (`src/fastpose/refiners/absolute_focal.py`): 7 tangent
+  parameters (rotation, translation, log-focal) with an analytic jacobian.
+
+</details>
+
+<details>
+<summary>Monodepth-assisted relative pose</summary>
+
+Relative pose from correspondences plus per-image monocular depth estimates
+(scale- or affine-invariant MDE outputs), following poselib's monodepth
+estimators. The depth convention is poselib's `MonoDepthTwoViewGeometry`: the
+3D point of correspondence i is `(d1_i + shift1) x1h_i` in camera 1 and
+`scale (d2_i + shift2) x2h_i` in camera 2. Four 3-point minimal solvers
+(`src/fastpose/solvers/monodepth.py`):
 
 - **Calibrated without shift** (`estimate_relative_pose_with_monodepth`,
-  scale-invariant depths): 3D points from the camera-1 depths, absolute
-  pose of camera 2 via the shared P3P kernel, depth scale from the first
+  scale-invariant depths): 3D points from the camera-1 depths, absolute pose
+  of camera 2 via the shared P3P kernel, depth scale from the first
   correspondence. Models `[R | t | scale | 0 | 0]` with metric t.
 - **Calibrated with shift** (`estimate_shift=True`, affine-invariant
   depths): port of poselib's `relpose_monodepth_3pt` — the problem reduces
@@ -271,8 +378,8 @@ camera 2. Four 3-point minimal solvers (`src/fastpose/solvers/monodepth.py`):
   eigenvalue of a 4x4 action matrix (Danilevsky + Sturm here). Models
   `[R | t | f | f | scale]`.
 - **Varying focal** (`estimate_varying_focal_relative_pose_with_monodepth`):
-  port of `relpose_monodepth_3pt_varying_focal` — a single 3x3 linear
-  system in (1/f1^2, s^2/f2^2, s^2). Models `[R | t | f1 | f2 | scale]`.
+  port of `relpose_monodepth_3pt_varying_focal` — a single 3x3 linear system
+  in (1/f1^2, s^2/f2^2, s^2). Models `[R | t | f1 | f2 | scale]`.
 
 All four assemble the pose from the two depth-induced point triplets
 (`Y X^-1` like poselib, with the quaternion SO(3) snap) and share one data
@@ -280,8 +387,8 @@ layout: six columns (x1, y1, x2, y2, d1, d2) plus the two hybrid weights.
 
 - **Scoring** is the plain truncated Sampson error (threshold `max_error`,
   poselib's `max_errors[1]`); the depth parameters do not enter the score.
-- **Local optimization** (`src/fastpose/refiners/monodepth.py`) minimizes the hybrid
-  cost of poselib's `MonoDepth*RelPoseRefiner`s: truncated Sampson
+- **Local optimization** (`src/fastpose/refiners/monodepth.py`) minimizes the
+  hybrid cost of poselib's `MonoDepth*RelPoseRefiner`s: truncated Sampson
   (weighted by `weight_sampson`) plus the truncated symmetric reprojection
   error through the monodepth 3D points, scaled by
   `scale_reproj = max_error^2 / max_reproj_error^2` so both terms truncate
@@ -291,155 +398,23 @@ layout: six columns (x1, y1, x2, y2, d1, d2) plus the two hybrid weights.
   scale), plus additive scale / shifts / focals per problem (7, 9, 8 and 9
   parameters).
 
-One known gap vs poselib: their python bindings run one extra final bundle
-over the inlier set with a truncated *Cauchy* loss after RANSAC, which on
-a small fraction of scenes escapes shallow local minima that the hard
-truncated loss cannot (zero gradient outside the threshold). On synthetic
-scenes this costs a few hundredths of mAA at a 15-40x runtime advantage
-(see `benchmarks/estimators/monodepth.py`).
-
-## Install
-
-Install from the repository root:
-
-```
-pip install .
-```
-
-Numba compiles kernels lazily on first use. To populate the local Numba cache
-up front, run:
-
-```
-fastpose-warmup
-```
-
-The warmup command runs small synthetic estimations for every backend. Use
-`fastpose-warmup --problem fundamental` / `essential` / `absolute` /
-`absolute-focal` / `varying-focal` / `shared-focal` / `monodepth` to warm
-up only one backend (`monodepth` covers all four monodepth variants). The
-monodepth final-refinement kernels are compiled once per `final_loss`
-(`cauchy`, `truncated_cauchy`; `truncated` reuses the local-optimization
-kernel), and the warmup drives each of them directly rather than hoping the
-synthetic RANSAC run reaches it.
-
-### Multiprocessing
-
-**Warm the cache before you fork.** Numba's on-disk cache is not safe against
-concurrent writers: `_IndexDataCacheFile.save` reads the index, picks the
-lowest free `.nbc` name, writes the index and then writes the data file, with
-no lock across those steps. Two worker processes compiling the same kernel at
-once can leave an index entry pointing at a *different* key's compiled code,
-and `load` does not check what it unpickles against the key it asked for.
-Running the wrong specialization writes past the caller's arrays, which
-surfaces as glibc `free(): invalid size` / `corrupted double-linked list`
-crashes at random points in a long run.
-
-Since the kernel cache keys are process-independent (see below), workers do
-share entries — which is what makes this reachable. So compile everything in
-the parent first:
-
-```python
-from fastpose.estimators.warmup import warmup
-
-warmup()                                # or run `fastpose-warmup` beforehand
-with multiprocessing.Pool(n) as pool:   # fork children inherit the compiled
-    ...                                 # kernels and never touch the cache
-```
-
-With the default `fork` start method the children inherit the compiled
-dispatchers in memory and never read or write the cache at all. Under `spawn`
-they re-import and load from the cache, which is safe as long as the warmup
-covered everything they use — anything it missed is compiled by every worker
-at once. The alternative, if you cannot warm up first, is to give each worker
-its own `NUMBA_CACHE_DIR` so nothing is shared.
-
-The two engines (`estimators/ransac.py`, `refiners/lm.py`) build their
-kernels as closures, and numba keys its on-disk cache on the *pickled*
-closure cells — which by default embed a per-process uuid per kernel, so
-those keys never matched again and the two most expensive kernels were
-recompiled in every process regardless of warmup. `src/fastpose/kernel_cache.py`
-gives each kernel a uuid derived from what it is (module, qualified name and,
-recursively, the kernels it closes over) instead of when it was built, which
-makes the keys reproducible while still separating the per-problem and
-per-loss specializations. With the cache populated, a fresh process reaches
-the first `estimate_relative_pose` result in ~0.5 s instead of ~9 s.
-
-## Usage
-
-Everything is reachable from the top-level `fastpose` package:
-
-```python
-import numpy as np
-from fastpose.estimators import estimate_relative_pose, estimate_fundamental, estimate_absolute_pose
-
-# calibrated relative pose (5-point): x1, x2 are normalized (x - c) / f
-model, info = estimate_relative_pose(
-    x1, x2, iterations=1000, max_error=2.0 / focal, lo_iterations=None)
-R, t = model['R'], model['t']
-
-# fundamental matrix (7-point): x1, x2 are pixel coordinates
-model, info = estimate_fundamental(
-    x1, x2, iterations=1000, max_error=2.0)
-F = model['F']
-
-# absolute pose (P3P): x is normalized image points, X the 3D points
-model, info = estimate_absolute_pose(
-    x, X, iterations=1000, max_error=2.0 / focal)
-R, t = model['R'], model['t']
-```
-
-Every `estimate_*` function follows the same pattern: it takes the
-correspondence arrays plus RANSAC options (`iterations`, `max_error`,
-`min_iterations` for adaptive termination, `lo_iterations` for the local
-optimization budget, `seed`) and returns `(model, info)`. `model` is a dict
-holding the estimated quantities (`R`/`t` for pose problems, plus `f`/`f1`,
-`f2` for the unknown-focal variants and `scale`/`shift1`/`shift2` for the
-monodepth ones, or `F` for the fundamental matrix); on total failure
-(`info['num_inliers'] == 0`) `model` holds a generic identity pose
-(`R = eye(3)`, `t = 0`, focals `= 1.0`) instead of a fit result. `info` is a
-dict with `inliers` (boolean mask), `num_inliers`, `model_score` (the
-scorer's truncated score), `iterations` (RANSAC samples drawn) and
-`refinements` (whether the post-RANSAC polish pass ran and was adopted). See
-the per-backend sections above for the full list
-(`estimate_relative_pose_with_varying_focals`,
-`estimate_relative_pose_with_shared_focal`,
-`estimate_absolute_pose_with_focal`,
-`estimate_relative_pose_with_monodepth`,
-`estimate_{shared,varying}_focal_relative_pose_with_monodepth`) and the
-`# params:` comment at the top of each function in
-`src/fastpose/estimators/` for exact argument units (several take
-normalized/calibrated points rather than pixels).
-
-## Running benchmarks and tests
-
-Run with (from the repository root):
-
-```
-python -m benchmarks.estimators.fundamental            # mAA vs runtime plot
-python -m benchmarks.estimators.essential
-python -m benchmarks.estimators.absolute
-python -m benchmarks.estimators.fundamental scaling    # runtime scaling table
-python -m benchmarks.estimators.essential scaling
-python -m benchmarks.estimators.absolute scaling
-python -m benchmarks.estimators.absolute focal         # P4Pf mAA plot
-python -m benchmarks.estimators.absolute focal-scaling
-python -m benchmarks.estimators.fundamental varying-focal   # varying-focal mAA plot
-python -m benchmarks.estimators.fundamental shared-focal    # shared-focal mAA plot
-
-python -m benchmarks.estimators.monodepth               # calibrated monodepth mAA plot
-python -m benchmarks.estimators.monodepth shared-focal
-python -m benchmarks.estimators.monodepth varying-focal
-python -m benchmarks.estimators.monodepth scaling       # runtime scaling table
-
-python -m benchmarks.solvers.fundamental               # noise-free minimal-sample accuracy
-python -m benchmarks.solvers.essential
-
-python -m pytest tests                                 # jacobian + estimator tests
-```
-
-(First call JIT-compiles the driver for a few seconds; the benchmarks warm up
-before timing.)
+</details>
 
 ## Next steps
 
-- Degeneracy handling (e.g. dominant-plane checks à la DEGENSAC).
+- Degeneracy handling (e.g. dominant-plane checks a la DEGENSAC).
+
+## Citations
+
+If you find this library useful please consider citing:
+
+```bibtex
+@misc{kocur2026fastpose,
+  title  = {{fastpose}: a fast Python backend for robust camera pose estimation},
+  author = {Kocur, Viktor},
+  year   = {2026},
+  url    = {https://github.com/kocurvik/fastpose}
+}
+```
+
+To cite individual solvers see [REFERENCES.md](REFERENCES.md).
