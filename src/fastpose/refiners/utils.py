@@ -51,6 +51,101 @@ def rodrigues(w0, w1, w2, R):
     R[2, 2] = 1.0 - b * (w0 * w0 + w1 * w1)
 
 
+@njit(cache=True)
+def tangent_basis(t, b1, b2):
+    # orthonormal basis (b1, b2) of the plane orthogonal to the unit vector
+    # t; deterministic in t so the jacobian and the retraction always agree
+    a0 = abs(t[0])
+    a1 = abs(t[1])
+    a2 = abs(t[2])
+    # b1 = t x e_k for the axis e_k of the smallest |component|
+    if a0 <= a1 and a0 <= a2:
+        b1[0] = 0.0
+        b1[1] = t[2]
+        b1[2] = -t[1]
+    elif a1 <= a2:
+        b1[0] = -t[2]
+        b1[1] = 0.0
+        b1[2] = t[0]
+    else:
+        b1[0] = t[1]
+        b1[1] = -t[0]
+        b1[2] = 0.0
+    inv = 1.0 / math.sqrt(b1[0] * b1[0] + b1[1] * b1[1] + b1[2] * b1[2])
+    b1[0] *= inv
+    b1[1] *= inv
+    b1[2] *= inv
+    b2[0] = t[1] * b1[2] - t[2] * b1[1]
+    b2[1] = t[2] * b1[0] - t[0] * b1[2]
+    b2[2] = t[0] * b1[1] - t[1] * b1[0]
+
+
+@njit(cache=True)
+def essential_tangent_rows(pose, e, B):
+    # rows 0..4 of B: dE/dtheta as flat 9-vectors for the 5 tangent
+    # parameters of E = [t]_x R with t on the unit sphere, given the pose
+    # [R (row-major 3x3) | t] and its flat E.
+    #
+    # rows 0..2 (rotation, retraction R exp([w]_x)): dE/dw_k = E skew(e_k),
+    # plain column shuffles of E
+    for i in range(3):
+        e0 = e[3 * i]
+        e1 = e[3 * i + 1]
+        e2 = e[3 * i + 2]
+        B[0, 3 * i] = 0.0
+        B[0, 3 * i + 1] = e2
+        B[0, 3 * i + 2] = -e1
+        B[1, 3 * i] = -e2
+        B[1, 3 * i + 1] = 0.0
+        B[1, 3 * i + 2] = e0
+        B[2, 3 * i] = e1
+        B[2, 3 * i + 1] = -e0
+        B[2, 3 * i + 2] = 0.0
+
+    # rows 3..4 (translation): dE/dalpha_i = [b_i]_x R, since dt/dalpha_i is
+    # b_i on the unit sphere (b_i is orthogonal to t, so the renormalization
+    # in the retraction is second order)
+    b1 = np.empty(3)
+    b2 = np.empty(3)
+    tangent_basis(pose[9:12], b1, b2)
+    for j in range(3):
+        r0 = pose[j]
+        r1 = pose[3 + j]
+        r2 = pose[6 + j]
+        B[3, j] = -b1[2] * r1 + b1[1] * r2
+        B[3, 3 + j] = b1[2] * r0 - b1[0] * r2
+        B[3, 6 + j] = -b1[1] * r0 + b1[0] * r1
+        B[4, j] = -b2[2] * r1 + b2[1] * r2
+        B[4, 3 + j] = b2[2] * r0 - b2[0] * r2
+        B[4, 6 + j] = -b2[1] * r0 + b2[0] * r1
+
+
+@njit(cache=True)
+def log_focal_tangent_rows(f, pp1x, pp1y, pp2x, pp2y, row1, row2):
+    # dF/dlog(f1) and dF/dlog(f2) of F = K2^-T E K1^-1, as flat 9-vectors.
+    #
+    # f1 enters only through K1^-1, which multiplies F from the right and so
+    # acts on its columns; f2 only through K2^-T, which multiplies from the
+    # left and acts on its rows. In both cases the derivative of the 1/f
+    # entries w.r.t. log f is just -(1/f), which folds the whole thing back
+    # into F itself - no E, no focal, and nothing to differentiate
+    # numerically:
+    #     dF/dlog f1: columns 0, 1 -> -F, column 2 -> pp1 . (F col0, F col1)
+    #     dF/dlog f2: rows    0, 1 -> -F, row    2 -> pp2 . (F row0, F row1)
+    for i in range(3):
+        c0 = f[3 * i]
+        c1 = f[3 * i + 1]
+        row1[3 * i] = -c0
+        row1[3 * i + 1] = -c1
+        row1[3 * i + 2] = pp1x * c0 + pp1y * c1
+    for j in range(3):
+        r0 = f[j]
+        r1 = f[3 + j]
+        row2[j] = -r0
+        row2[3 + j] = -r1
+        row2[6 + j] = pp2x * r0 + pp2y * r1
+
+
 @njit(cache=True, inline='always')
 def factorized_f(U, Vt, sigma, f):
     # F = U @ diag(1, sigma, 0) @ Vt, written into the flat 9-vector f

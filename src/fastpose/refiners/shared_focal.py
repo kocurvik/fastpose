@@ -5,13 +5,14 @@ import math
 import numpy as np
 from numba import njit
 
-from fastpose.refiners.essential import _tangent_basis
 from fastpose.refiners.lm import build_lm_refine
 from fastpose.refiners.losses import TruncatedLoss
 from fastpose.refiners.utils import (accumulate_sampson_normal_eqs, build_sampson_accumulate,
-                            mat3_mul, rodrigues)
+                            essential_tangent_rows, log_focal_tangent_rows,
+                            mat3_mul, rodrigues, tangent_basis as _tangent_basis)
 from fastpose.scorers.sampson import (build_varying_focal_pose_sampson_cost,
-                             model_to_fundamental, shared_focal_pose_sampson_score)
+                             calibrate_epipolar, essential_from_pose,
+                             shared_focal_pose_sampson_score)
 from fastpose.solvers.shared_focal import MODEL_SIZE
 
 STATE_SIZE = 13
@@ -69,36 +70,31 @@ def _make_accumulate(sampson_accumulate):
     @njit(cache=True)
     def _accumulate(data, f, state, JtJ, Jtr, max_error_sq):
         x1_x, x1_y, x2_x, x2_y, pp1x, pp1y, pp2x, pp2y = data
-        base_f = np.empty(9)
-        model = np.empty(MODEL_SIZE)
-        _state_to_model(state, model)
-        if not model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, base_f):
+        focal = f[12]
+        if focal <= 0.0:
             return 0
+        inv = 1.0 / focal
+
+        e = np.empty(9)
+        essential_from_pose(f, e)
+        base_f = np.empty(9)
+        calibrate_epipolar(e, pp1x, pp1y, pp2x, pp2y, inv, inv, base_f)
 
         B = np.empty((NUM_TANGENT, 9))
-        state_plus = np.empty(STATE_SIZE)
-        state_minus = np.empty(STATE_SIZE)
-        model_plus = np.empty(MODEL_SIZE)
-        model_minus = np.empty(MODEL_SIZE)
-        f_plus = np.empty(9)
-        f_minus = np.empty(9)
-        delta = np.zeros(NUM_TANGENT)
-        h = 1e-6
-        inv_2h = 0.5 / h
-        for p in range(NUM_TANGENT):
-            delta[p] = h
-            _apply_step(state, delta, state_plus)
-            delta[p] = -h
-            _apply_step(state, delta, state_minus)
-            delta[p] = 0.0
-            _state_to_model(state_plus, model_plus)
-            _state_to_model(state_minus, model_minus)
-            if not model_to_fundamental(model_plus, pp1x, pp1y, pp2x, pp2y, f_plus):
-                return 0
-            if not model_to_fundamental(model_minus, pp1x, pp1y, pp2x, pp2y, f_minus):
-                return 0
-            for j in range(9):
-                B[p, j] = (f_plus[j] - f_minus[j]) * inv_2h
+        # pose rows: E -> F is linear, so dF/dtheta is the tangent direction
+        # dE/dtheta pushed through the very same map
+        dE = np.empty((5, 9))
+        essential_tangent_rows(f, e, dE)
+        for p in range(5):
+            calibrate_epipolar(dE[p], pp1x, pp1y, pp2x, pp2y, inv, inv, B[p])
+
+        # focal row: the two focals are one parameter here, so dF/dlog f is
+        # the sum of the two single-focal derivatives
+        row1 = np.empty(9)
+        row2 = np.empty(9)
+        log_focal_tangent_rows(base_f, pp1x, pp1y, pp2x, pp2y, row1, row2)
+        for j in range(9):
+            B[5, j] = row1[j] + row2[j]
 
         return sampson_accumulate(
             (x1_x, x1_y, x2_x, x2_y), base_f, B, JtJ, Jtr, max_error_sq)

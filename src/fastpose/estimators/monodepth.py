@@ -186,8 +186,11 @@ def estimate_relative_pose_with_monodepth(
         R, t, x1, x2, max_error)
     refined = False
 
-    # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if final_refinement_iterations != 0 and num_inliers > 0:
+    # final polish: robust-loss refinement restricted to the RANSAC inliers.
+    # Fewer inliers than the minimal sample size cannot constrain the model,
+    # so the pass is skipped there (poselib gates its bundle the same way)
+    if (final_refinement_iterations != 0
+            and num_inliers > solver_cls.sample_size):
         final_refiner = _get_final_refiner(kind, loss)
         inlier_data = _monodepth_data(
             x1[inliers], x2[inliers], d1[inliers], d2[inliers],
@@ -259,8 +262,11 @@ def estimate_shared_focal_relative_pose_with_monodepth(
         R, t, f, f, x1c, x2c, max_error)
     refined = False
 
-    # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if final_refinement_iterations != 0 and num_inliers > 0:
+    # final polish: robust-loss refinement restricted to the RANSAC inliers.
+    # Fewer inliers than the minimal sample size cannot constrain the model,
+    # so the pass is skipped there (poselib gates its bundle the same way)
+    if (final_refinement_iterations != 0
+            and num_inliers > MonoDepthSharedFocalSolver.sample_size):
         final_refiner = _get_final_refiner('shared-focal', loss)
         inlier_data = _monodepth_data(
             x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
@@ -332,8 +338,11 @@ def estimate_varying_focal_relative_pose_with_monodepth(
         R, t, f1, f2, x1c, x2c, max_error)
     refined = False
 
-    # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if final_refinement_iterations != 0 and num_inliers > 0:
+    # final polish: robust-loss refinement restricted to the RANSAC inliers.
+    # Fewer inliers than the minimal sample size cannot constrain the model,
+    # so the pass is skipped there (poselib gates its bundle the same way)
+    if (final_refinement_iterations != 0
+            and num_inliers > MonoDepthVaryingFocalSolver.sample_size):
         final_refiner = _get_final_refiner('varying-focal', loss)
         inlier_data = _monodepth_data(
             x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],

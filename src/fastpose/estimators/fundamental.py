@@ -100,8 +100,11 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
     refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers,
-    # done in the same normalized frame/threshold as the RANSAC pipeline
-    if final_refinement_iterations != 0 and num_inliers > 0:
+    # done in the same normalized frame/threshold as the RANSAC pipeline.
+    # Fewer inliers than the minimal sample size cannot constrain the model,
+    # so the pass is skipped there (poselib gates its bundle the same way)
+    if (final_refinement_iterations != 0
+            and num_inliers > SevenPointSolver.sample_size):
         final_refiner = _get_final_refiner()
         inlier_data = point_columns(x1n[inliers], x2n[inliers])
         refined_model = np.empty(9)

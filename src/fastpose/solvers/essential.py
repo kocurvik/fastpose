@@ -573,11 +573,12 @@ def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
     # t spans the left nullspace of E, computed as the largest cross product
     # of two columns; the twisted-pair rotations follow from Horn's formula
     # R = cof(E) -/+ [t]_x E for E scaled to unit nonzero singular values
-    # and unit t. Of the four candidates {R_a, R_b} x {t, -t} the one with
-    # the best cheirality count on the minimal sample is written to `pose`.
-    # The cheirality vote calibrates points as (x - pp) / f, so problems
-    # whose `data` already holds calibrated points pass pp = 0, f = 1.
-    # R is a (2, 3, 3) scratch buffer. Returns False for degenerate e.
+    # and unit t. Of the four candidates {R_a, R_b} x {t, -t} the first one
+    # that puts every sample point in front of both cameras is written to
+    # `pose`. The cheirality check calibrates points as (x - pp) / f, so
+    # problems whose `data` already holds calibrated points pass pp = 0,
+    # f = 1. R is a (2, 3, 3) scratch buffer. Returns False for a degenerate
+    # e and for an e no candidate of which is cheirality-consistent.
     x1_x, x1_y, x2_x, x2_y = data
 
     # scale so the nonzero singular values are 1: |E|_F^2 = 2 sigma^2
@@ -670,8 +671,15 @@ def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
     R[1, 2, 1] = c21 + s21
     R[1, 2, 2] = c22 + s22
 
-    best_count = -1
-    best_r = 0
+    # A candidate is accepted only if *every* sample point triangulates in
+    # front of both cameras, as in poselib's motion_from_essential. A majority
+    # vote is not enough here: all four candidates share the same E and so
+    # score identically under Sampson, which means neither the RANSAC scorer
+    # nor the Sampson LM refiner can ever undo a wrong twisted-pair or sign
+    # choice - a mis-voted candidate would leave the pose ~180 degrees off with
+    # nothing downstream able to notice. Rejecting the model instead lets the
+    # sample be discarded.
+    best_r = -1
     best_sign = 1.0
     for ri in range(2):
         for si in range(2):
@@ -679,7 +687,7 @@ def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
             t0 = sign * tx
             t1 = sign * ty
             t2 = sign * tz
-            count = 0
+            all_in_front = True
             for k in range(sample.shape[0]):
                 idx = sample[k]
                 x = (x1_x[idx] - pp1x) / f1
@@ -699,15 +707,23 @@ def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
                 d2 = xp * t1 - yp * t0
                 cc = c0 * c0 + c1 * c1 + c2 * c2
                 if cc <= 0.0:
-                    continue
+                    # the two rays are parallel: the depth is undefined, so the
+                    # point cannot be confirmed to lie in front
+                    all_in_front = False
+                    break
                 z1 = -(c0 * d0 + c1 * d1 + c2 * d2) / cc
                 z2 = z1 * rx2 + t2
-                if z1 > 0.0 and z2 > 0.0:
-                    count += 1
-            if count > best_count:
-                best_count = count
+                if not (z1 > 0.0 and z2 > 0.0):
+                    all_in_front = False
+                    break
+            if all_in_front:
                 best_r = ri
                 best_sign = sign
+                break
+        if best_r >= 0:
+            break
+    if best_r < 0:
+        return False
 
     for i in range(3):
         for j in range(3):

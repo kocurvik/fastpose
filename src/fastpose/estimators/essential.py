@@ -80,8 +80,11 @@ def estimate_relative_pose(x1, x2, camera1=None, camera2=None, iterations=1000,
     score, inliers, num_inliers = PoseSampsonScorer.score_numpy(R, t, x1, x2, max_error)
     refined = False
 
-    # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if final_refinement_iterations != 0 and num_inliers > 0:
+    # final polish: robust-loss refinement restricted to the RANSAC inliers.
+    # Fewer inliers than the minimal sample size cannot constrain the model,
+    # so the pass is skipped there (poselib gates its bundle the same way)
+    if (final_refinement_iterations != 0
+            and num_inliers > FivePointSolver.sample_size):
         final_refiner = _get_final_refiner()
         inlier_data = point_columns(x1[inliers], x2[inliers])
         refined_model = np.empty(12)

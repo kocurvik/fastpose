@@ -81,8 +81,10 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
         R, t, f, x, X, max_error)
     refined = False
 
-    # final polish: robust-loss refinement restricted to the RANSAC inliers
-    if final_refinement_iterations != 0 and num_inliers > 0:
+    # final polish: robust-loss refinement restricted to the RANSAC inliers.
+    # Fewer inliers than the minimal sample size cannot constrain the model,
+    # so the pass is skipped there (poselib gates its bundle the same way)
+    if final_refinement_iterations != 0 and num_inliers > P4PFSolver.sample_size:
         final_refiner = _get_final_refiner()
         inlier_data = (np.ascontiguousarray(x[inliers, 0]),
                        np.ascontiguousarray(x[inliers, 1]),

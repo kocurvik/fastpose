@@ -9,14 +9,20 @@ J_fd^T J_fd and J_fd^T r.
 
 The fundamental refiner works on flat 3x3 models with the factorized
 U/Vt/sigma state; the essential refiner works on pose models [R | t] whose
-residuals go through E = [t]_x R.
+residuals go through E = [t]_x R; the two focal refiners work on
+[R | t | f1 | f2] whose residuals go through F = K2^-T E K1^-1. The focal
+cases use non-zero principal points on purpose - the analytic focal jacobian
+rows carry pp-dependent terms that a pp = 0 test would leave unchecked.
 """
 
 import numpy as np
 import pytest
 
-from fastpose.refiners import essential, fundamental
+from fastpose.refiners import essential, fundamental, shared_focal, varying_focal
 from fastpose.refiners import utils as refiner_utils
+
+PP1 = np.array([0.3, -0.2])
+PP2 = np.array([-0.1, 0.25])
 
 
 def _skew(t):
@@ -46,6 +52,35 @@ def _pose_to_e(model):
     return (_skew(t) @ R).ravel()
 
 
+def _random_focal(rng):
+    return float(np.exp(rng.normal(scale=0.3)))
+
+
+def _random_shared_focal_model(rng):
+    f = _random_focal(rng)
+    return np.concatenate([_random_pose_model(rng), [f, f]])
+
+
+def _random_varying_focal_model(rng):
+    return np.concatenate([_random_pose_model(rng),
+                           [_random_focal(rng), _random_focal(rng)]])
+
+
+def _focal_model_to_f(model):
+    # F = K2^-T E K1^-1, the matrix the focal refiners' residuals go through
+    E = _skew(model[9:12]) @ model[:9].reshape(3, 3)
+    f1, f2 = model[12], model[13]
+    K1i = np.array([[1.0 / f1, 0.0, -PP1[0] / f1],
+                    [0.0, 1.0 / f1, -PP1[1] / f1],
+                    [0.0, 0.0, 1.0]])
+    K2i = np.array([[1.0 / f2, 0.0, -PP2[0] / f2],
+                    [0.0, 1.0 / f2, -PP2[1] / f2],
+                    [0.0, 0.0, 1.0]])
+    return (K2i.T @ E @ K1i).ravel()
+
+
+_PP_DATA = (PP1[0], PP1[1], PP2[0], PP2[1])
+
 CASES = {
     'fundamental': dict(
         init_state=fundamental._init_state,
@@ -68,6 +103,30 @@ CASES = {
         model_size=essential.MODEL_SIZE,
         make_model=_random_pose_model,
         model_to_e=_pose_to_e,
+    ),
+    'shared_focal': dict(
+        init_state=shared_focal._init_state,
+        accumulate=shared_focal._accumulate,
+        apply_step=shared_focal._apply_step,
+        state_to_model=shared_focal._state_to_model,
+        state_size=shared_focal.STATE_SIZE,
+        num_tangent=shared_focal.NUM_TANGENT,
+        model_size=14,
+        make_model=_random_shared_focal_model,
+        model_to_e=_focal_model_to_f,
+        extra_data=_PP_DATA,
+    ),
+    'varying_focal': dict(
+        init_state=varying_focal._init_state,
+        accumulate=varying_focal._accumulate,
+        apply_step=varying_focal._apply_step,
+        state_to_model=varying_focal._state_to_model,
+        state_size=varying_focal.STATE_SIZE,
+        num_tangent=varying_focal.NUM_TANGENT,
+        model_size=14,
+        make_model=_random_varying_focal_model,
+        model_to_e=_focal_model_to_f,
+        extra_data=_PP_DATA,
     ),
 }
 
@@ -108,12 +167,12 @@ def fd_jacobian(state, case, x1, x2, h=1e-6):
     return J
 
 
-def make_points(rng, n):
+def make_points(rng, n, case):
     x1 = rng.uniform(-1.0, 1.0, size=(n, 2))
     x2 = rng.uniform(-1.0, 1.0, size=(n, 2))
     data = (np.ascontiguousarray(x1[:, 0]), np.ascontiguousarray(x1[:, 1]),
             np.ascontiguousarray(x2[:, 0]), np.ascontiguousarray(x2[:, 1]))
-    return x1, x2, data
+    return x1, x2, data + case.get('extra_data', ())
 
 
 def make_state(case, rng):
@@ -131,7 +190,7 @@ def test_normal_equations_match_finite_differences(name, seed):
     case = CASES[name]
     rng = np.random.default_rng(seed)
     n = 60
-    x1, x2, data = make_points(rng, n)
+    x1, x2, data = make_points(rng, n, case)
     state, f = make_state(case, rng)
     num_tangent = case['num_tangent']
 
@@ -155,7 +214,7 @@ def test_truncation_only_counts_inliers(name):
     case = CASES[name]
     rng = np.random.default_rng(7)
     n = 200
-    x1, x2, data = make_points(rng, n)
+    x1, x2, data = make_points(rng, n, case)
     state, f = make_state(case, rng)
     num_tangent = case['num_tangent']
 

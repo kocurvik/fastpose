@@ -125,18 +125,12 @@ class PoseSampsonScorer():
 
 
 @njit(cache=True)
-def model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, f):
-    # f = flat F = K2^-T E K1^-1 for a pose model [R | t | f1 | f2] with
-    # K = [[f, 0, ppx], [0, f, ppy], [0, 0, 1]]; False for invalid focals
-    f1 = model[12]
-    f2 = model[13]
-    if f1 <= 0.0 or f2 <= 0.0:
-        return False
-    e = np.empty(9)
-    essential_from_pose(model, e)
-    inv1 = 1.0 / f1
-    inv2 = 1.0 / f2
-    # rows of A = K2^-T E, then columns of F = A K1^-1
+def calibrate_epipolar(e, pp1x, pp1y, pp2x, pp2y, inv1, inv2, f):
+    # f = flat K2^-T e K1^-1 for a flat row-major 3x3 e, with inv1 = 1 / f1,
+    # inv2 = 1 / f2 and K = [[f, 0, ppx], [0, f, ppy], [0, 0, 1]]. The map is
+    # linear in e, so the focal refiners reuse it to push a tangent direction
+    # dE/dtheta through to dF/dtheta with the same code that builds F itself.
+    # rows of A = K2^-T e, then columns of F = A K1^-1
     a = np.empty(9)
     for j in range(3):
         a[j] = inv2 * e[j]
@@ -147,6 +141,19 @@ def model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, f):
         f[3 * i + 1] = inv1 * a[3 * i + 1]
         f[3 * i + 2] = (a[3 * i + 2]
                         - inv1 * (pp1x * a[3 * i] + pp1y * a[3 * i + 1]))
+
+
+@njit(cache=True)
+def model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, f):
+    # f = flat F = K2^-T E K1^-1 for a pose model [R | t | f1 | f2] with
+    # K = [[f, 0, ppx], [0, f, ppy], [0, 0, 1]]; False for invalid focals
+    f1 = model[12]
+    f2 = model[13]
+    if f1 <= 0.0 or f2 <= 0.0:
+        return False
+    e = np.empty(9)
+    essential_from_pose(model, e)
+    calibrate_epipolar(e, pp1x, pp1y, pp2x, pp2y, 1.0 / f1, 1.0 / f2, f)
     return True
 
 

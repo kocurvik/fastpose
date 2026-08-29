@@ -68,6 +68,16 @@ def build_ransac(solve_fn, score_fn, refine_fn, sample_size, num_params,
         sample = np.empty(sample_size, dtype=np.int64)
         workspace = np.empty(workspace_size)
 
+        # Best score and inlier count over *minimal* models only. These decide
+        # when local optimization runs and are deliberately never updated by a
+        # refined model, so a fresh minimal sample keeps triggering LO for the
+        # whole run instead of only until the first refinement - refining from
+        # an unrefined minimal sample explores a different basin than
+        # re-refining the incumbent, and that is where most of the accuracy of
+        # LO-RANSAC comes from. Mirrors poselib's RansacState::best_minimal_*.
+        best_minimal_score = 1e300
+        best_minimal_num_inliers = 0
+
         log_fail = math.log(1.0 - success_prob)
         dyn_max_iterations = max_iterations
 
@@ -90,8 +100,30 @@ def build_ransac(solve_fn, score_fn, refine_fn, sample_size, num_params,
 
             num_models = solve_fn(data, sample, models, workspace)
 
+            # the last minimal model to improve either minimal tracker; that is
+            # the one handed to local optimization
+            lo_candidate = -1
+            lo_candidate_inliers = 0
             for m in range(num_models):
-                score, num_inliers = score_fn(models[m], data, max_error_sq, best_score)
+                # the bail-out bound is the best *minimal* score rather than the
+                # global best, so a promising sample is still scored in full
+                # long after the global best has been refined out of its reach.
+                # A model that does bail out is dropped on both criteria: it
+                # cannot beat best_minimal_score, and the inlier count that
+                # comes back with a bailed-out score is partial, so it cannot
+                # be compared either.
+                score, num_inliers = score_fn(models[m], data, max_error_sq,
+                                              best_minimal_score)
+                more_inliers = num_inliers > best_minimal_num_inliers
+                better_score = score < best_minimal_score
+                if not (more_inliers or better_score):
+                    continue
+                if more_inliers:
+                    best_minimal_num_inliers = num_inliers
+                if better_score:
+                    best_minimal_score = score
+                lo_candidate = m
+                lo_candidate_inliers = num_inliers
 
                 if score < best_score:
                     best_score = score
@@ -99,33 +131,35 @@ def build_ransac(solve_fn, score_fn, refine_fn, sample_size, num_params,
                     for j in range(num_params):
                         best_model[j] = models[m, j]
 
-                    # local optimization: non-minimal refit on the inliers of
-                    # the new best model, keep the result if it scores better
-                    if lo_iterations > 0 and num_inliers > sample_size:
-                        if refine_fn(data, best_model, refined, max_error_sq, lo_iterations):
-                            lo_score, lo_num_inliers = score_fn(refined, data,
-                                                                max_error_sq, best_score)
-                            if lo_score < best_score:
-                                best_score = lo_score
-                                best_num_inliers = lo_num_inliers
-                                for j in range(num_params):
-                                    best_model[j] = refined[j]
+            if lo_candidate >= 0:
+                # local optimization: non-minimal refit seeded from the minimal
+                # model, adopted only if it beats the global best
+                if lo_iterations > 0 and lo_candidate_inliers > sample_size:
+                    if refine_fn(data, models[lo_candidate], refined,
+                                 max_error_sq, lo_iterations):
+                        lo_score, lo_num_inliers = score_fn(refined, data,
+                                                            max_error_sq, best_score)
+                        if lo_score < best_score:
+                            best_score = lo_score
+                            best_num_inliers = lo_num_inliers
+                            for j in range(num_params):
+                                best_model[j] = refined[j]
 
-                    # adaptive iteration count (only relevant when
-                    # min_iterations < max_iterations)
-                    eps = best_num_inliers / num_points
-                    if eps > 0.0:
-                        eps_k = eps ** sample_size
-                        if eps_k >= 1.0:
-                            dyn_max_iterations = 0
-                        elif eps_k > 0.0:
-                            log_success_fail = math.log(1.0 - eps_k)
-                            if log_success_fail < 0.0:
-                                dyn_max_iterations = int(log_fail / log_success_fail) + 1
-                            else:
-                                dyn_max_iterations = max_iterations
+                # adaptive iteration count (only relevant when
+                # min_iterations < max_iterations)
+                eps = best_num_inliers / num_points
+                if eps > 0.0:
+                    eps_k = eps ** sample_size
+                    if eps_k >= 1.0:
+                        dyn_max_iterations = 0
+                    elif eps_k > 0.0:
+                        log_success_fail = math.log(1.0 - eps_k)
+                        if log_success_fail < 0.0:
+                            dyn_max_iterations = int(log_fail / log_success_fail) + 1
                         else:
                             dyn_max_iterations = max_iterations
+                    else:
+                        dyn_max_iterations = max_iterations
 
         # final refinement of the overall best model
         if lo_iterations > 0 and best_num_inliers > sample_size:

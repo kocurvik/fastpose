@@ -101,8 +101,11 @@ def estimate_relative_pose_with_shared_focal(
     refined = False
 
     # final polish: robust-loss refinement restricted to the RANSAC inliers,
-    # done in the same normalized frame/threshold as the RANSAC pipeline
-    if final_refinement_iterations != 0 and num_inliers > 0:
+    # done in the same normalized frame/threshold as the RANSAC pipeline.
+    # Fewer inliers than the minimal sample size cannot constrain the model,
+    # so the pass is skipped there (poselib gates its bundle the same way)
+    if (final_refinement_iterations != 0
+            and num_inliers > SixPointSharedFocalSolver.sample_size):
         final_refiner = _get_final_refiner()
         inlier_data = _data_tuple(x1n[inliers], x2n[inliers], pp1n, pp2n)
         refined_model = np.empty(14)
