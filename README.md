@@ -190,6 +190,28 @@ reachable through `fastpose` (e.g. `from fastpose.solvers import p3p`) —
 Technical detail on each backend's solver/scorer/refiner, for anyone
 extending fastpose or curious how a specific number is computed.
 
+### `fastmath`
+
+`fastmath=True` goes on the kernels where reassociation and FMA contraction
+measurably pay — the minimal solvers, the per-point scoring loops and the LM
+accumulate kernels — and stays off the O(1) work around them: the per-model
+and per-LM-iteration setup in `refiners/utils.py`, the state retractions and
+the RANSAC driver itself. Numba's fast-math flags are per-function and do not
+propagate into a separately compiled callee, so flagging a thin wrapper only
+affects its own handful of scalar operations. Kernels declared
+`inline='always'` need no flag either: numba inlines them at the Numba IR
+level, so they are lowered with their caller's setting.
+
+Where it pays it pays well — the monodepth LM engine is ~40% slower without
+it, the 7-point solver ~11% — and where it does not, the flag is left off
+rather than applied for uniformity. Enabling it on the RANSAC driver, for
+instance, measures 0% and bit-identical results, because all of that loop's
+arithmetic lives in the solver, scorer and refiner it calls; it would only
+add `nnan` to the score comparisons, which every kernel here is written to
+avoid needing (`1e300` is the failure sentinel throughout, never `inf`).
+
+The one deliberate removal is the shared-focal solver, below.
+
 <details>
 <summary>Fundamental matrix (7-point)</summary>
 
@@ -296,7 +318,8 @@ principal points:
   parameters — rotation (3), translation direction (2) and one shared
   log-focal — with the Sampson jacobian built like the varying-focal
   refiner.
-- The solver is the one module compiled **without** `fastmath`: its
+- The solver is the one module where `fastmath` is deliberately switched
+  **off** (see [`fastmath`](#fastmath) above): its
   action-matrix/characteristic-polynomial chain is ill-conditioned enough
   that allowing reassociation made the recovered focal depend on whether the
   kernels were freshly compiled or loaded from the numba cache (~1e-8
