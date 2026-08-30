@@ -78,7 +78,7 @@ def _det3_flat(f):
             + f[2] * (f[3] * f[7] - f[4] * f[6]))
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def _solve_cubic_real(c3, c2, c1, c0, roots):
     # real roots of c3*x^3 + c2*x^2 + c1*x + c0, closed form (no companion
     # matrix eigendecomposition like np.roots)
@@ -139,7 +139,7 @@ def _solve_cubic_real(c3, c2, c1, c0, roots):
     return n_roots
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def _nullspace_7pt(A, f1, f2):
     # two-dimensional nullspace of the 7x9 epipolar constraint matrix via
     # Gaussian elimination with partial pivoting and back-substitution;
@@ -197,7 +197,7 @@ def _nullspace_7pt(A, f1, f2):
     return True
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def _solve_7pt(data, sample, models, workspace):
     # minimal 7-point solver; writes up to 3 models (flattened F) into
     # `models` and returns their count

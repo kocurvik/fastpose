@@ -43,7 +43,7 @@ def _mat3_mul_local(A, B, C):
             C[i, j] = A[i, 0] * B[0, j] + A[i, 1] * B[1, j] + A[i, 2] * B[2, j]
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def bougnoux_focals_sq(F, pp1x, pp1y, pp2x, pp2y, out):
     M = F.reshape(3, 3)
     U, s, Vt = np.linalg.svd(M)
@@ -119,7 +119,7 @@ def bougnoux_focals_sq(F, pp1x, pp1y, pp2x, pp2y, out):
     return out[0] > 0.0 and out[1] > 0.0
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def _solve_varying_focal_7pt(data, sample, models, workspace):
     x1_x, x1_y, x2_x, x2_y, pp1x, pp1y, pp2x, pp2y = data
     A = workspace[0:63].reshape(7, 9)
