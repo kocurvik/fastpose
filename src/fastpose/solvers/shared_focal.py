@@ -1568,6 +1568,8 @@ def _solve_shared_focal_6pt(data, sample, models, workspace):
     n_sols = _solver_shared_focal_relpose_6pt(d, sols, solver_ws)
     count = 0
     for i in range(n_sols):
+        if count >= models.shape[0]:
+            break
         inv_f_sq = sols[i, 2]
         if inv_f_sq <= 1e-12:
             continue
@@ -1603,20 +1605,21 @@ def _solve_shared_focal_6pt(data, sample, models, workspace):
         e[6] = focal * f20
         e[7] = focal * f21
         e[8] = f22
-        if _pose_from_essential(e, (x1_x, x1_y, x2_x, x2_y), sample,
-                                pp1x, pp1y, pp2x, pp2y, focal, focal,
-                                models[count], Rbuf):
-            models[count, 12] = focal
-            models[count, 13] = focal
-            count += 1
-            if count == 15:
-                break
+        num_poses = _pose_from_essential(e, (x1_x, x1_y, x2_x, x2_y), sample,
+                                         pp1x, pp1y, pp2x, pp2y, focal, focal,
+                                         models, count, Rbuf)
+        for k in range(count, count + num_poses):
+            models[k, 12] = focal
+            models[k, 13] = focal
+        count += num_poses
     return count
 
 
 class SixPointSharedFocalSolver():
     sample_size = 6
     num_params = MODEL_SIZE
-    max_models = 15
+    # up to 15 real roots, each of which can contribute more than one
+    # cheirality-consistent pose (4 in the worst case, ~1 in practice)
+    max_models = 60
     workspace_size = 3662
     solve = staticmethod(_solve_shared_focal_6pt)

@@ -251,12 +251,28 @@ The one deliberate removal is the shared-focal solver, below.
   Sturm-sequence bracketing with bisection + Newton polish — because
   LAPACK's nonsymmetric eigensolver is not available inside numba kernels.
 - **Direct pose output with cheirality check**: each E candidate is decomposed
-  inside the solver kernel into the (R, t) candidate with the best
-  cheirality count on the minimal sample, so RANSAC models are poses
+  inside the solver kernel into the (R, t) candidates that put *every*
+  minimal-sample point in front of both cameras, so RANSAC models are poses
   `[R | t]` (12 flat parameters) and the estimator returns (R, t) directly —
-  no post-hoc `motion_from_essential` on the winning model.
+  no post-hoc `motion_from_essential` on the winning model. All consistent
+  candidates are emitted, as poselib's `motion_from_essential` does: the four
+  share one E and so score identically under Sampson, which means a candidate
+  dropped here is a hypothesis RANSAC never gets to try.
 - **Pose Sampson scorer**: the same truncated Sampson form as for F, with
-  `E = [t]_x R` assembled on the fly from the pose model.
+  `E = [t]_x R` assembled on the fly from the pose model, plus the per-point
+  cheirality check (minimum depth 0.01, on unit rays) that poselib's
+  `CameraPose` overloads of `compute_sampson_msac_score` and `get_inliers`
+  apply. A point that passes the Sampson test but triangulates behind either
+  camera is charged the truncation constant and not counted as an inlier.
+  The matrix overloads poselib uses for the focal problems have no such
+  check, so neither do the focal scorers here.
+- **Local optimization over the relaxed inlier subset**: the LO refit runs
+  over the points within 5x the squared threshold rather than the whole
+  correspondence set, matching `RelativePoseEstimator::refine_model`. The
+  truncated loss already zeroes the weight of everything past 1x, so the
+  normal equations are unaffected — but the LM's accept/reject test is not,
+  and letting far outliers contribute a constant the jacobian never models
+  costs both accuracy and iterations.
 - **LM refiner on the pose directly**: 5 tangent parameters — a minimal,
   gauge-free parametrization of the essential manifold — 3 for the rotation
   update `R exp([w]_x)` and 2 for the translation direction in an orthonormal
@@ -266,9 +282,9 @@ The one deliberate removal is the shared-focal solver, below.
 
 (The 5-point solver is ~10x more expensive per iteration than the 7-point
 one, so its advantage at small n is smaller; scoring still dominates for
-dense matches. Inlier counts are not directly comparable to poselib for this
-problem since poselib additionally applies cheirality filtering during
-scoring.)
+dense matches. Inlier counts still differ slightly from poselib's: the mask
+returned here is recomputed after the final polish pass, where poselib
+reports the one it extracted before it.)
 
 </details>
 
@@ -284,13 +300,17 @@ points:
   formula (square pixels, known principal points), then E = K2^T F K1
   decomposed with the shared closed-form essential decomposition and
   cheirality check into pose models `[R | t | f1 | f2]` (14 flat
-  parameters).
+  parameters) — every cheirality-consistent candidate, as in the calibrated
+  solver above.
 - **Scorer**: the truncated Sampson error of the induced fundamental matrix
-  F = K2^-T E K1^-1, evaluated in the original pixel coordinates.
+  F = K2^-T E K1^-1, evaluated in the original pixel coordinates. No
+  cheirality check: poselib scores an F here, through the matrix overload.
 - **LM refiner** (`src/fastpose/refiners/varying_focal.py`): 7 tangent
   parameters — rotation (3), translation direction (2) and the two
   log-focals — with the Sampson jacobian built from a central-difference
-  tangent basis of the induced F.
+  tangent basis of the induced F. Local optimization refits over the 5x
+  relaxed inlier subset, as `VaryingFocalRelativePoseEstimator::refine_model`
+  does.
 - Hypotheses whose Bougnoux focal estimates are non-positive are rejected
   inside the solver.
 
@@ -312,12 +332,15 @@ principal points:
   extracted with the shared Danilevsky + Sturm machinery. Each solution
   gives F and the focal; E = K^T F K is decomposed with the shared
   closed-form essential decomposition and cheirality check into pose models
-  `[R | t | f | f]` (14 flat parameters, varying-focal layout).
-- **Scorer**: the varying-focal truncated Sampson scorer reused verbatim.
+  `[R | t | f | f]` (14 flat parameters, varying-focal layout) — every
+  cheirality-consistent candidate, as in the calibrated solver above.
+- **Scorer**: the varying-focal truncated Sampson scorer reused verbatim (no
+  cheirality check — poselib scores an F here too).
 - **LM refiner** (`src/fastpose/refiners/shared_focal.py`): 6 tangent
   parameters — rotation (3), translation direction (2) and one shared
   log-focal — with the Sampson jacobian built like the varying-focal
-  refiner.
+  refiner. Local optimization refits over the 5x relaxed inlier subset, as
+  `SharedFocalRelativePoseEstimator::refine_model` does.
 - The solver is the one module where `fastmath` is deliberately switched
   **off** (see [`fastmath`](#fastmath) above): its
   action-matrix/characteristic-polynomial chain is ill-conditioned enough

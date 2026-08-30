@@ -3,7 +3,24 @@
 The same Sampson form works for fundamental and essential matrices;
 `SampsonScorer` scores flat 3x3 models directly, `PoseSampsonScorer` scores
 relative pose models [R | t] by assembling E = [t]_x R on the fly.
+
+Poselib has two overloads of `compute_sampson_msac_score` (robust/utils.cc)
+and they are not equivalent. The one taking a `CameraPose` - used by the
+calibrated `RelativePoseEstimator` - additionally requires every inlier to
+triangulate in front of both cameras (`check_cheirality` with a minimum
+depth of `MIN_DEPTH`); a point that passes the Sampson test but fails
+cheirality is charged the truncation constant and not counted. The one
+taking a matrix - used by the shared- and varying-focal estimators, which
+score an F rather than a pose - does not. `get_inliers` splits the same way.
+`PoseSampsonScorer` therefore applies the check and the focal scorers below
+deliberately do not.
+
+The check belongs to model *scoring* only: poselib's bundles minimize the
+plain Sampson cost, so the cheirality-free `pose_sampson_score` (and the
+kernels from `build_pose_sampson_cost`) are what the LM refiners use.
 """
+
+import math
 
 import numpy as np
 from numba import njit
@@ -51,6 +68,34 @@ def sampson_score(f, data, max_error_sq, best_score):
     return score, num_inliers
 
 
+def sampson_errors_numpy(F, x1, x2):
+    # vectorized squared Sampson error of every correspondence; inf where the
+    # denominator degenerates, so those points land in the outlier branch
+    x1_x = x1[:, 0]
+    x1_y = x1[:, 1]
+    x2_x = x2[:, 0]
+    x2_y = x2[:, 1]
+
+    fx1_0 = F[0, 0] * x1_x + F[0, 1] * x1_y + F[0, 2]
+    fx1_1 = F[1, 0] * x1_x + F[1, 1] * x1_y + F[1, 2]
+    fx1_2 = F[2, 0] * x1_x + F[2, 1] * x1_y + F[2, 2]
+    ftx2_0 = F[0, 0] * x2_x + F[1, 0] * x2_y + F[2, 0]
+    ftx2_1 = F[0, 1] * x2_x + F[1, 1] * x2_y + F[2, 1]
+
+    residual = x2_x * fx1_0 + x2_y * fx1_1 + fx1_2
+    denominator = fx1_0 * fx1_0 + fx1_1 * fx1_1 + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1
+    errors = np.full(len(x1), np.inf)
+    valid = denominator > 0.0
+    errors[valid] = residual[valid] * residual[valid] / denominator[valid]
+    return errors
+
+
+def _msac(errors, inliers, max_error_sq):
+    # truncated score for a given inlier decision: inliers contribute their
+    # own residual, everything else the truncation constant
+    return float(np.sum(np.where(inliers, errors, max_error_sq)))
+
+
 class SampsonScorer():
     # truncated Sampson error (MSAC) scorer for epipolar geometry; the same
     # scorer works for fundamental and essential matrix models
@@ -60,30 +105,10 @@ class SampsonScorer():
     def score_numpy(F, x1, x2, max_error):
         # vectorized reference implementation; also used to extract the
         # final inlier mask
-        x1_x = x1[:, 0]
-        x1_y = x1[:, 1]
-        x2_x = x2[:, 0]
-        x2_y = x2[:, 1]
         max_error_sq = max_error ** 2
-
-        fx1_0 = F[0, 0] * x1_x + F[0, 1] * x1_y + F[0, 2]
-        fx1_1 = F[1, 0] * x1_x + F[1, 1] * x1_y + F[1, 2]
-        fx1_2 = F[2, 0] * x1_x + F[2, 1] * x1_y + F[2, 2]
-        ftx2_0 = F[0, 0] * x2_x + F[1, 0] * x2_y + F[2, 0]
-        ftx2_1 = F[0, 1] * x2_x + F[1, 1] * x2_y + F[2, 1]
-
-        residual = x2_x * fx1_0 + x2_y * fx1_1 + fx1_2
-        denominator = fx1_0 * fx1_0 + fx1_1 * fx1_1 + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1
-        errors = np.full(len(x1), np.inf)
-        valid = denominator > 0.0
-        errors[valid] = residual[valid] * residual[valid] / denominator[valid]
-
+        errors = sampson_errors_numpy(F, x1, x2)
         inliers = errors <= max_error_sq
-        np.minimum(errors, max_error_sq, out=errors)
-        score = np.sum(errors)
-        num_inliers = np.count_nonzero(inliers)
-
-        return score, inliers, num_inliers
+        return _msac(errors, inliers, max_error_sq), inliers, int(np.count_nonzero(inliers))
 
 
 @njit(cache=True, inline='always')
@@ -105,23 +130,122 @@ def essential_from_pose(pose, e):
 @njit(cache=True, fastmath=True)
 def pose_sampson_score(model, data, max_error_sq, best_score):
     # scorer for pose models: assemble E = [t]_x R, then the shared
-    # truncated Sampson score
+    # truncated Sampson score. No cheirality check - this is the cost the LM
+    # refiners minimize, matching poselib's bundles; model selection goes
+    # through pose_sampson_cheirality_score instead
     e = np.empty(9)
     essential_from_pose(model, e)
     return sampson_score(e, data, max_error_sq, best_score)
 
 
+# minimum depth poselib's robust/utils.cc passes to check_cheirality, in
+# units of the pose translation (unit norm for the models this package
+# produces, so effectively a fraction of the baseline)
+MIN_DEPTH = 0.01
+
+
+@njit(cache=True, inline='always')
+def cheirality_ok(pose, x, y, xp, yp, min_depth):
+    # poselib's check_cheirality (misc/essential.cc): the two depths from the
+    # least-squares intersection of the unit rays through the calibrated
+    # points (x, y) and (xp, yp) must both exceed min_depth. The common
+    # 1 / (1 - a^2) factor is positive, so upstream drops it and scales
+    # min_depth by (1 - a^2) instead; kept identical here.
+    inv1 = 1.0 / math.sqrt(x * x + y * y + 1.0)
+    inv2 = 1.0 / math.sqrt(xp * xp + yp * yp + 1.0)
+    u0 = x * inv1
+    u1 = y * inv1
+    u2 = inv1
+    v0 = xp * inv2
+    v1 = yp * inv2
+    v2 = inv2
+    ru0 = pose[0] * u0 + pose[1] * u1 + pose[2] * u2
+    ru1 = pose[3] * u0 + pose[4] * u1 + pose[5] * u2
+    ru2 = pose[6] * u0 + pose[7] * u1 + pose[8] * u2
+    tx = pose[9]
+    ty = pose[10]
+    tz = pose[11]
+    a = -(ru0 * v0 + ru1 * v1 + ru2 * v2)
+    b1 = -(ru0 * tx + ru1 * ty + ru2 * tz)
+    b2 = v0 * tx + v1 * ty + v2 * tz
+    depth1 = b1 - a * b2
+    depth2 = b2 - a * b1
+    thr = min_depth * (1.0 - a * a)
+    return depth1 > thr and depth2 > thr
+
+
+@njit(cache=True, fastmath=True)
+def pose_sampson_cheirality_score(model, data, max_error_sq, best_score):
+    # poselib's compute_sampson_msac_score(CameraPose, ...): the truncated
+    # Sampson score of E = [t]_x R, with a point counted as an inlier (and
+    # charged its own residual rather than the truncation constant) only if
+    # it also triangulates in front of both cameras. Same chunked early
+    # bail-out as sampson_score - the score still only grows.
+    x1_x, x1_y, x2_x, x2_y = data
+    e = np.empty(9)
+    essential_from_pose(model, e)
+    n = x1_x.shape[0]
+    chunk = 512
+    score = 0.0
+    num_inliers = 0
+    start = 0
+    while start < n:
+        end = min(start + chunk, n)
+        for i in range(start, end):
+            x = x1_x[i]
+            y = x1_y[i]
+            xp = x2_x[i]
+            yp = x2_y[i]
+            ex1_0 = e[0] * x + e[1] * y + e[2]
+            ex1_1 = e[3] * x + e[4] * y + e[5]
+            ex1_2 = e[6] * x + e[7] * y + e[8]
+            etx2_0 = e[0] * xp + e[3] * yp + e[6]
+            etx2_1 = e[1] * xp + e[4] * yp + e[7]
+            residual = xp * ex1_0 + yp * ex1_1 + ex1_2
+            denominator = (ex1_0 * ex1_0 + ex1_1 * ex1_1
+                           + etx2_0 * etx2_0 + etx2_1 * etx2_1)
+            r2 = residual * residual
+            if (denominator > 0.0 and r2 < max_error_sq * denominator
+                    and cheirality_ok(model, x, y, xp, yp, MIN_DEPTH)):
+                score += r2 / denominator
+                num_inliers += 1
+            else:
+                score += max_error_sq
+        if score >= best_score:
+            return score, num_inliers
+        start = end
+    return score, num_inliers
+
+
+def cheirality_mask_numpy(R, t, x1, x2, min_depth=MIN_DEPTH):
+    # vectorized cheirality_ok over all correspondences
+    x1h = np.column_stack([x1, np.ones(len(x1))])
+    x2h = np.column_stack([x2, np.ones(len(x2))])
+    u = x1h / np.linalg.norm(x1h, axis=1)[:, np.newaxis]
+    v = x2h / np.linalg.norm(x2h, axis=1)[:, np.newaxis]
+    ru = u @ np.asarray(R).T
+    a = -np.sum(ru * v, axis=1)
+    b1 = -(ru @ t)
+    b2 = v @ t
+    thr = min_depth * (1.0 - a * a)
+    return (b1 - a * b2 > thr) & (b2 - a * b1 > thr)
+
+
 class PoseSampsonScorer():
     # truncated Sampson error (MSAC) scorer for relative pose models
-    # [R | t] (12 flat parameters, R row-major)
-    score = staticmethod(pose_sampson_score)
+    # [R | t] (12 flat parameters, R row-major), cheirality-checked per point
+    # exactly as poselib's CameraPose overloads are
+    score = staticmethod(pose_sampson_cheirality_score)
 
     @staticmethod
     def score_numpy(R, t, x1, x2, max_error):
         E = np.array([[0.0, -t[2], t[1]],
                       [t[2], 0.0, -t[0]],
                       [-t[1], t[0], 0.0]]) @ R
-        return SampsonScorer.score_numpy(E, x1, x2, max_error)
+        max_error_sq = max_error ** 2
+        errors = sampson_errors_numpy(E, x1, x2)
+        inliers = (errors <= max_error_sq) & cheirality_mask_numpy(R, t, x1, x2)
+        return _msac(errors, inliers, max_error_sq), inliers, int(np.count_nonzero(inliers))
 
 
 @njit(cache=True)
@@ -198,8 +322,14 @@ def shared_focal_pose_sampson_score(model, data, max_error_sq, best_score):
 def monodepth_pose_sampson_score(model, data, max_error_sq, best_score):
     # scorer for calibrated monodepth models [R | t | scale | shift1 |
     # shift2]: the truncated Sampson error of E = [t]_x R (the depth
-    # parameters do not enter the scoring, matching poselib's monodepth
-    # estimators which score with the plain Sampson MSAC error)
+    # parameters do not enter the scoring).
+    #
+    # Poselib's RelativePoseMonoDepthEstimator scores through the CameraPose
+    # overload and so does apply the cheirality check that PoseSampsonScorer
+    # now mirrors. It is deliberately not applied here: these models carry a
+    # metric translation rather than a unit one, which changes what
+    # MIN_DEPTH means, so aligning the monodepth estimators needs its own
+    # look rather than a copy of the calibrated scorer.
     x1_x, x1_y, x2_x, x2_y = data[0], data[1], data[2], data[3]
     e = np.empty(9)
     essential_from_pose(model, e)
@@ -213,7 +343,11 @@ class MonoDepthPoseSampsonScorer():
 
     @staticmethod
     def score_numpy(R, t, x1, x2, max_error):
-        return PoseSampsonScorer.score_numpy(R, t, x1, x2, max_error)
+        # no cheirality check, matching monodepth_pose_sampson_score above
+        E = np.array([[0.0, -t[2], t[1]],
+                      [t[2], 0.0, -t[0]],
+                      [-t[1], t[0], 0.0]]) @ R
+        return SampsonScorer.score_numpy(E, x1, x2, max_error)
 
 
 @njit(cache=True, fastmath=True)

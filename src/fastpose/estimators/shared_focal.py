@@ -7,6 +7,7 @@ from fastpose.estimators.utils import (build_info, check_min_points, failure_inf
                                        normalize_points)
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.shared_focal import LMSharedFocalPoseRefiner
+from fastpose.refiners.utils import LO_INLIER_SCALE
 from fastpose.scorers.sampson import SharedFocalPoseSampsonScorer
 from fastpose.solvers.shared_focal import SixPointSharedFocalSolver
 
@@ -17,10 +18,13 @@ _final_refiner = None
 def _get_default_estimator():
     global _default_estimator
     if _default_estimator is None:
+        # the local-optimization refit runs over the relaxed-threshold inlier
+        # subset, matching poselib's
+        # SharedFocalRelativePoseEstimator::refine_model
         _default_estimator = RansacEstimator(
             SixPointSharedFocalSolver(),
             SharedFocalPoseSampsonScorer(),
-            LMSharedFocalPoseRefiner(),
+            LMSharedFocalPoseRefiner(relaxed_inlier_scale=LO_INLIER_SCALE),
         )
     return _default_estimator
 

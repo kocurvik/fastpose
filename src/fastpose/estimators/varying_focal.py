@@ -6,6 +6,7 @@ from fastpose.estimators.ransac import RansacEstimator
 from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
                                        normalize_points)
 from fastpose.refiners.losses import CauchyLoss
+from fastpose.refiners.utils import LO_INLIER_SCALE
 from fastpose.refiners.varying_focal import LMVaryingFocalPoseRefiner
 from fastpose.scorers.sampson import VaryingFocalPoseSampsonScorer
 from fastpose.solvers.varying_focal import SevenPointVaryingFocalSolver
@@ -17,10 +18,13 @@ _final_refiner = None
 def _get_default_estimator():
     global _default_estimator
     if _default_estimator is None:
+        # the local-optimization refit runs over the relaxed-threshold inlier
+        # subset, matching poselib's
+        # VaryingFocalRelativePoseEstimator::refine_model
         _default_estimator = RansacEstimator(
             SevenPointVaryingFocalSolver(),
             VaryingFocalPoseSampsonScorer(),
-            LMVaryingFocalPoseRefiner(),
+            LMVaryingFocalPoseRefiner(relaxed_inlier_scale=LO_INLIER_SCALE),
         )
     return _default_estimator
 

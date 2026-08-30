@@ -9,6 +9,11 @@ F = U diag(1, sigma, 0) Vt. The state vector layout is shared:
 
 Tangent parameters are two rotation updates (U exp([w1]_x), exp(-[w2]_x) Vt)
 plus, for the fundamental matrix only, the singular value ratio sigma.
+
+`build_pose_lo_refine` / `build_focal_lo_refine` at the bottom wrap an LM
+kernel into the local-optimization refiner the relative-pose estimators hand
+to the RANSAC driver: it restricts the refit to the relaxed-threshold inlier
+subset the way poselib's `refine_model` does (see `LO_INLIER_SCALE`).
 """
 
 import math
@@ -16,9 +21,24 @@ import math
 import numpy as np
 from numba import njit
 
+from fastpose.kernel_cache import stabilize
 from fastpose.refiners.losses import TruncatedLoss
+from fastpose.scorers.sampson import (MIN_DEPTH, cheirality_ok,
+                                      essential_from_pose, model_to_fundamental)
 
 STATE_SIZE = 19
+
+# Poselib's relative-pose estimators do not bundle over the whole
+# correspondence set during local optimization: `refine_model` first calls
+# `get_inliers` at this multiple of the squared threshold and refines over
+# that subset only (robust/estimators/relative_pose.cc). The truncated loss
+# already zeroes the *weight* of everything past 1x, so the normal equations
+# are unaffected - but the LM's accept/reject test is not. Every far outlier
+# otherwise contributes a constant max_error_sq that the jacobian never
+# models, and points crossing the threshold add noise that swamps the true
+# cost decrease, causing spurious rejections that inflate lambda and burn the
+# iteration budget. The estimators pass this as `relaxed_inlier_scale`.
+LO_INLIER_SCALE = 5.0
 
 
 @njit(cache=True, inline='always')
@@ -328,3 +348,114 @@ def build_sampson_accumulate(loss):
 
 
 accumulate_sampson_normal_eqs = build_sampson_accumulate(TruncatedLoss())
+
+
+# ---------------------------------------------------------------------------
+# local-optimization wrappers: refine over the relaxed-threshold inlier subset
+# only, the way poselib's *RelativePoseEstimator::refine_model does
+# ---------------------------------------------------------------------------
+
+@njit(cache=True)
+def _relaxed_inlier_mask(x1_x, x1_y, x2_x, x2_y, f, threshold_sq, keep):
+    # poselib's get_inliers for a flat row-major 3x3 epipolar matrix `f`:
+    # marks the points whose squared Sampson error is below threshold_sq and
+    # returns how many there are
+    n = x1_x.shape[0]
+    count = 0
+    for i in range(n):
+        x = x1_x[i]
+        y = x1_y[i]
+        xp = x2_x[i]
+        yp = x2_y[i]
+        fx1_0 = f[0] * x + f[1] * y + f[2]
+        fx1_1 = f[3] * x + f[4] * y + f[5]
+        fx1_2 = f[6] * x + f[7] * y + f[8]
+        ftx2_0 = f[0] * xp + f[3] * yp + f[6]
+        ftx2_1 = f[1] * xp + f[4] * yp + f[7]
+        residual = xp * fx1_0 + yp * fx1_1 + fx1_2
+        denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
+                       + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
+        ok = denominator > 0.0 and residual * residual < threshold_sq * denominator
+        keep[i] = ok
+        if ok:
+            count += 1
+    return count
+
+
+@njit(cache=True)
+def _pose_relaxed_inlier_mask(x1_x, x1_y, x2_x, x2_y, pose, threshold_sq, keep):
+    # same, for a pose model: E = [t]_x R plus the per-point cheirality check
+    # that poselib's CameraPose overload of get_inliers applies
+    e = np.empty(9)
+    essential_from_pose(pose, e)
+    count = _relaxed_inlier_mask(x1_x, x1_y, x2_x, x2_y, e, threshold_sq, keep)
+    for i in range(x1_x.shape[0]):
+        if keep[i] and not cheirality_ok(pose, x1_x[i], x1_y[i], x2_x[i],
+                                         x2_y[i], MIN_DEPTH):
+            keep[i] = False
+            count -= 1
+    return count
+
+
+@njit(cache=True)
+def _compact_columns(x1_x, x1_y, x2_x, x2_y, keep, count):
+    sx1_x = np.empty(count)
+    sx1_y = np.empty(count)
+    sx2_x = np.empty(count)
+    sx2_y = np.empty(count)
+    j = 0
+    for i in range(x1_x.shape[0]):
+        if keep[i]:
+            sx1_x[j] = x1_x[i]
+            sx1_y[j] = x1_y[i]
+            sx2_x[j] = x2_x[i]
+            sx2_y[j] = x2_y[i]
+            j += 1
+    return sx1_x, sx1_y, sx2_x, sx2_y
+
+
+def build_pose_lo_refine(refine_fn, min_inliers, relaxed_scale=LO_INLIER_SCALE):
+    # wraps a pose-model LM kernel so it refines over the relaxed-threshold
+    # inlier subset only. `min_inliers` mirrors the `num_inl <= N` early
+    # return in poselib's refine_model; returning False leaves the caller
+    # with the unrefined model, which is what upstream ends up scoring too.
+    stabilize(refine_fn)
+
+    @njit(cache=True)
+    def refine(data, model, refined, max_error_sq, num_iterations):
+        x1_x, x1_y, x2_x, x2_y = data
+        keep = np.empty(x1_x.shape[0], dtype=np.bool_)
+        count = _pose_relaxed_inlier_mask(x1_x, x1_y, x2_x, x2_y, model,
+                                          relaxed_scale * max_error_sq, keep)
+        if count <= min_inliers:
+            return False
+        subset = _compact_columns(x1_x, x1_y, x2_x, x2_y, keep, count)
+        return refine_fn(subset, model, refined, max_error_sq, num_iterations)
+
+    return refine
+
+
+def build_focal_lo_refine(refine_fn, min_inliers, relaxed_scale=LO_INLIER_SCALE):
+    # same, for the shared- and varying-focal models [R | t | f1 | f2], whose
+    # data tuple carries the two principal points alongside the coordinate
+    # columns. Poselib selects the subset with the matrix overload of
+    # get_inliers here, so there is no cheirality check.
+    stabilize(refine_fn)
+
+    @njit(cache=True)
+    def refine(data, model, refined, max_error_sq, num_iterations):
+        x1_x, x1_y, x2_x, x2_y, pp1x, pp1y, pp2x, pp2y = data
+        f = np.empty(9)
+        if not model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, f):
+            return False
+        keep = np.empty(x1_x.shape[0], dtype=np.bool_)
+        count = _relaxed_inlier_mask(x1_x, x1_y, x2_x, x2_y, f,
+                                     relaxed_scale * max_error_sq, keep)
+        if count <= min_inliers:
+            return False
+        sx1_x, sx1_y, sx2_x, sx2_y = _compact_columns(x1_x, x1_y, x2_x, x2_y,
+                                                      keep, count)
+        subset = (sx1_x, sx1_y, sx2_x, sx2_y, pp1x, pp1y, pp2x, pp2y)
+        return refine_fn(subset, model, refined, max_error_sq, num_iterations)
+
+    return refine

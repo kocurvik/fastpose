@@ -17,14 +17,16 @@ from numba import njit
 
 from fastpose.refiners.lm import build_lm_refine
 from fastpose.refiners.losses import TruncatedLoss
-from fastpose.refiners.utils import (accumulate_sampson_normal_eqs, build_sampson_accumulate,
-                            essential_tangent_rows, mat3_mul, rodrigues,
-                            tangent_basis as _tangent_basis)
+from fastpose.refiners.utils import (accumulate_sampson_normal_eqs, build_pose_lo_refine,
+                            build_sampson_accumulate, essential_tangent_rows,
+                            mat3_mul, rodrigues, tangent_basis as _tangent_basis)
 from fastpose.scorers.sampson import build_pose_sampson_cost, essential_from_pose, pose_sampson_score
 
 STATE_SIZE = 12
 MODEL_SIZE = 12
 NUM_TANGENT = 5  # 3 rotation + 2 translation direction
+# poselib's `if (num_inl <= 5) return;` gate in RelativePoseEstimator::refine_model
+MIN_INLIERS = 5
 
 
 @njit(cache=True)
@@ -94,6 +96,7 @@ _refine_essential_lm = build_lm_refine(_init_state, _state_to_model,
                                        NUM_TANGENT, MODEL_SIZE)
 
 _final_kernels = {}
+_lo_kernels = {}
 
 
 def _get_final_refine(loss):
@@ -111,6 +114,16 @@ def _get_final_refine(loss):
     return _final_kernels[key]
 
 
+def _get_lo_refine(refine_fn, relaxed_scale):
+    # one subset-restricted kernel per (base kernel, scale); memoized so
+    # rebuilding a refiner does not recompile
+    key = (refine_fn, relaxed_scale)
+    if key not in _lo_kernels:
+        _lo_kernels[key] = build_pose_lo_refine(refine_fn, MIN_INLIERS,
+                                                relaxed_scale)
+    return _lo_kernels[key]
+
+
 class LMEssentialRefiner():
     # local optimization: LM on the Sampson error with the pose (R, t)
     # optimized directly (5 tangent parameters, t on the unit sphere).
@@ -118,10 +131,22 @@ class LMEssentialRefiner():
     # matching every RANSAC-internal use; pass e.g. CauchyLoss() or
     # TruncatedCauchyLoss() for a final polish pass on an inlier-only
     # subset).
-    def __init__(self, num_iterations=25, loss=TruncatedLoss()):
+    # `relaxed_inlier_scale` restricts the refit to the points within that
+    # multiple of the squared threshold, as poselib's
+    # RelativePoseEstimator::refine_model does; pass
+    # refiners.utils.LO_INLIER_SCALE for the RANSAC-internal refiner and
+    # leave it None for a final polish pass, which is already handed an
+    # inlier-only subset.
+    def __init__(self, num_iterations=25, loss=TruncatedLoss(),
+                 relaxed_inlier_scale=None):
         self.num_iterations = num_iterations
         self.loss = loss
-        if not isinstance(loss, TruncatedLoss):
-            self.refine = _get_final_refine(loss)
+        self.relaxed_inlier_scale = relaxed_inlier_scale
+        refine = (_refine_essential_lm if isinstance(loss, TruncatedLoss)
+                  else _get_final_refine(loss))
+        if relaxed_inlier_scale is not None:
+            refine = _get_lo_refine(refine, float(relaxed_inlier_scale))
+        if refine is not _refine_essential_lm:
+            self.refine = refine
 
     refine = staticmethod(_refine_essential_lm)

@@ -167,6 +167,8 @@ def _solve_varying_focal_7pt(data, sample, models, workspace):
 
     count = 0
     for r in range(n_roots):
+        if count >= models.shape[0]:
+            break
         alpha = roots[r]
         beta = 1.0 - alpha
         for j in range(9):
@@ -194,18 +196,21 @@ def _solve_varying_focal_7pt(data, sample, models, workspace):
         e[6] = f1 * a20
         e[7] = f1 * a21
         e[8] = pp1x * a20 + pp1y * a21 + a22
-        if _pose_from_essential(e, (x1_x, x1_y, x2_x, x2_y), sample,
-                                pp1x, pp1y, pp2x, pp2y, f1, f2,
-                                models[count], Rbuf):
-            models[count, 12] = f1
-            models[count, 13] = f2
-            count += 1
+        num_poses = _pose_from_essential(e, (x1_x, x1_y, x2_x, x2_y), sample,
+                                         pp1x, pp1y, pp2x, pp2y, f1, f2,
+                                         models, count, Rbuf)
+        for k in range(count, count + num_poses):
+            models[k, 12] = f1
+            models[k, 13] = f2
+        count += num_poses
     return count
 
 
 class SevenPointVaryingFocalSolver():
     sample_size = 7
     num_params = MODEL_SIZE
-    max_models = 3
+    # up to 3 real roots of the cubic, each of which can contribute more than
+    # one cheirality-consistent pose (4 in the worst case, ~1 in practice)
+    max_models = 12
     workspace_size = 122
     solve = staticmethod(_solve_varying_focal_7pt)

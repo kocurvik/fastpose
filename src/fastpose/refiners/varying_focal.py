@@ -13,9 +13,10 @@ from numba import njit
 
 from fastpose.refiners.lm import build_lm_refine
 from fastpose.refiners.losses import TruncatedLoss
-from fastpose.refiners.utils import (accumulate_sampson_normal_eqs, build_sampson_accumulate,
-                            essential_tangent_rows, log_focal_tangent_rows,
-                            mat3_mul, rodrigues, tangent_basis as _tangent_basis)
+from fastpose.refiners.utils import (accumulate_sampson_normal_eqs, build_focal_lo_refine,
+                            build_sampson_accumulate, essential_tangent_rows,
+                            log_focal_tangent_rows, mat3_mul, rodrigues,
+                            tangent_basis as _tangent_basis)
 from fastpose.scorers.sampson import (build_varying_focal_pose_sampson_cost,
                              calibrate_epipolar, essential_from_pose,
                              varying_focal_pose_sampson_score)
@@ -23,6 +24,9 @@ from fastpose.solvers.varying_focal import MODEL_SIZE
 
 STATE_SIZE = 14
 NUM_TANGENT = 7
+# poselib's `if (num_inl <= 7) return;` gate in
+# VaryingFocalRelativePoseEstimator::refine_model
+MIN_INLIERS = 7
 
 
 @njit(cache=True)
@@ -114,6 +118,7 @@ _refine_varying_focal_lm = build_lm_refine(
     varying_focal_pose_sampson_score, STATE_SIZE, NUM_TANGENT, MODEL_SIZE)
 
 _final_kernels = {}
+_lo_kernels = {}
 
 
 def _get_final_refine(loss):
@@ -129,15 +134,31 @@ def _get_final_refine(loss):
     return _final_kernels[key]
 
 
+def _get_lo_refine(refine_fn, relaxed_scale):
+    key = (refine_fn, relaxed_scale)
+    if key not in _lo_kernels:
+        _lo_kernels[key] = build_focal_lo_refine(refine_fn, MIN_INLIERS,
+                                                 relaxed_scale)
+    return _lo_kernels[key]
+
+
 class LMVaryingFocalPoseRefiner():
     # `loss` selects the robust cost/weighting (TruncatedLoss by default,
     # matching every RANSAC-internal use; pass e.g. CauchyLoss() or
     # TruncatedCauchyLoss() for a final polish pass on an inlier-only
-    # subset).
-    def __init__(self, num_iterations=15, loss=TruncatedLoss()):
+    # subset). `relaxed_inlier_scale` restricts the refit to the relaxed
+    # inlier subset, as poselib's refine_model does - see
+    # refiners/essential.py's LMEssentialRefiner.
+    def __init__(self, num_iterations=15, loss=TruncatedLoss(),
+                 relaxed_inlier_scale=None):
         self.num_iterations = num_iterations
         self.loss = loss
-        if not isinstance(loss, TruncatedLoss):
-            self.refine = _get_final_refine(loss)
+        self.relaxed_inlier_scale = relaxed_inlier_scale
+        refine = (_refine_varying_focal_lm if isinstance(loss, TruncatedLoss)
+                  else _get_final_refine(loss))
+        if relaxed_inlier_scale is not None:
+            refine = _get_lo_refine(refine, float(relaxed_inlier_scale))
+        if refine is not _refine_varying_focal_lm:
+            self.refine = refine
 
     refine = staticmethod(_refine_varying_focal_lm)

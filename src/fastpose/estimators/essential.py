@@ -13,6 +13,7 @@ from fastpose.estimators.utils import (build_info, check_min_points, failure_inf
                                        point_columns, unproject_pair)
 from fastpose.refiners.essential import LMEssentialRefiner
 from fastpose.refiners.losses import CauchyLoss
+from fastpose.refiners.utils import LO_INLIER_SCALE
 from fastpose.scorers.sampson import PoseSampsonScorer
 from fastpose.solvers.essential import FivePointSolver
 
@@ -23,8 +24,11 @@ _final_refiner = None
 def _get_default_estimator():
     global _default_estimator
     if _default_estimator is None:
-        _default_estimator = RansacEstimator(FivePointSolver(), PoseSampsonScorer(),
-                                             LMEssentialRefiner())
+        # the local-optimization refit runs over the relaxed-threshold inlier
+        # subset, matching poselib's RelativePoseEstimator::refine_model
+        _default_estimator = RansacEstimator(
+            FivePointSolver(), PoseSampsonScorer(),
+            LMEssentialRefiner(relaxed_inlier_scale=LO_INLIER_SCALE))
     return _default_estimator
 
 

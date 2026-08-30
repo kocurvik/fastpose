@@ -568,17 +568,23 @@ def _nullspace_free_last(G, v):
 
 @njit(cache=True, fastmath=True)
 def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
-                         pose, R):
+                         models, first, R):
     # closed-form decomposition of the flat essential matrix e (no SVD):
     # t spans the left nullspace of E, computed as the largest cross product
     # of two columns; the twisted-pair rotations follow from Horn's formula
     # R = cof(E) -/+ [t]_x E for E scaled to unit nonzero singular values
-    # and unit t. Of the four candidates {R_a, R_b} x {t, -t} the first one
-    # that puts every sample point in front of both cameras is written to
-    # `pose`. The cheirality check calibrates points as (x - pp) / f, so
-    # problems whose `data` already holds calibrated points pass pp = 0,
-    # f = 1. R is a (2, 3, 3) scratch buffer. Returns False for a degenerate
-    # e and for an e no candidate of which is cheirality-consistent.
+    # and unit t. Every one of the four candidates {R_a, R_b} x {t, -t} that
+    # puts all sample points in front of both cameras is written to `models`,
+    # starting at row `first`; the number written is returned (0 for a
+    # degenerate e, or for an e no candidate of which is
+    # cheirality-consistent). Poselib's motion_from_essential likewise emits
+    # all consistent candidates rather than stopping at the first - the four
+    # share one E and so score identically under Sampson, so a hypothesis
+    # dropped here is one RANSAC never gets to try.
+    #
+    # The cheirality check calibrates points as (x - pp) / f, so problems
+    # whose `data` already holds calibrated points pass pp = 0, f = 1. R is a
+    # (2, 3, 3) scratch buffer.
     x1_x, x1_y, x2_x, x2_y = data
 
     # scale so the nonzero singular values are 1: |E|_F^2 = 2 sigma^2
@@ -586,7 +592,7 @@ def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
     for j in range(9):
         norm_sq += e[j] * e[j]
     if norm_sq < 1e-24:
-        return False
+        return 0
     s = math.sqrt(2.0 / norm_sq)
     e0 = s * e[0]
     e1 = s * e[1]
@@ -623,7 +629,7 @@ def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
         u2 = w2
         un = wn
     if un < 1e-24:
-        return False
+        return 0
     inv = 1.0 / math.sqrt(un)
     tx = u0 * inv
     ty = u1 * inv
@@ -679,10 +685,12 @@ def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
     # choice - a mis-voted candidate would leave the pose ~180 degrees off with
     # nothing downstream able to notice. Rejecting the model instead lets the
     # sample be discarded.
-    best_r = -1
-    best_sign = 1.0
+    capacity = models.shape[0] - first
+    count = 0
     for ri in range(2):
         for si in range(2):
+            if count >= capacity:
+                return count
             sign = 1.0 if si == 0 else -1.0
             t0 = sign * tx
             t1 = sign * ty
@@ -717,21 +725,15 @@ def _pose_from_essential(e, data, sample, pp1x, pp1y, pp2x, pp2y, f1, f2,
                     all_in_front = False
                     break
             if all_in_front:
-                best_r = ri
-                best_sign = sign
-                break
-        if best_r >= 0:
-            break
-    if best_r < 0:
-        return False
-
-    for i in range(3):
-        for j in range(3):
-            pose[3 * i + j] = R[best_r, i, j]
-    pose[9] = best_sign * tx
-    pose[10] = best_sign * ty
-    pose[11] = best_sign * tz
-    return True
+                row = first + count
+                for i in range(3):
+                    for j in range(3):
+                        models[row, 3 * i + j] = R[ri, i, j]
+                models[row, 9] = t0
+                models[row, 10] = t1
+                models[row, 11] = t2
+                count += 1
+    return count
 
 
 @njit(cache=True, fastmath=True)
@@ -797,6 +799,8 @@ def _solve_5pt(data, sample, models, workspace):
 
     count = 0
     for r in range(num_roots):
+        if count >= models.shape[0]:
+            break
         lam = roots[r]
         _action_matrix(M, G)
         for d in range(10):
@@ -808,9 +812,8 @@ def _solve_5pt(data, sample, models, workspace):
         z_sol = v[8]
         for j in range(9):
             e[j] = lam * N[0, j] + y_sol * N[1, j] + z_sol * N[2, j] + N[3, j]
-        if _pose_from_essential(e, data, sample, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0,
-                                models[count], Rbuf):
-            count += 1
+        count += _pose_from_essential(e, data, sample, 0.0, 0.0, 0.0, 0.0,
+                                      1.0, 1.0, models, count, Rbuf)
     return count
 
 
@@ -823,6 +826,8 @@ class FivePointSolver():
     # outputs pose models [R | t] (cheirality-checked on the sample)
     sample_size = 5
     num_params = 12
-    max_models = 10
+    # up to 10 real roots, each of which can contribute more than one
+    # cheirality-consistent pose (4 in the worst case, ~1 in practice)
+    max_models = 40
     workspace_size = 946
     solve = staticmethod(_solve_5pt)
