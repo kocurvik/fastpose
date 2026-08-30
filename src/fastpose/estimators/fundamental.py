@@ -64,7 +64,8 @@ def _get_final_refiner():
 
 def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
                          min_iterations=None, success_prob=0.9999,
-                         lo_iterations=25, final_refinement_iterations=100):
+                         lo_iterations=25, final_refinement_iterations=100,
+                         num_threads=None, batch_per_thread=None):
     # params:
     # x1, x2 - (n, 2) arrays of corresponding points
     # iterations - maximum number of RANSAC iterations
@@ -76,6 +77,15 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
     # final_refinement_iterations - LM step budget for the final Cauchy-loss
     #                 polish pass on the RANSAC inliers; independent of
     #                 lo_iterations. Defaults to 100; 0 disables the pass
+    # num_threads - >1 switches to the batched parallel RANSAC driver
+    #     (see estimators/ransac.py): hypotheses are drawn in batches of
+    #     num_threads * batch_per_thread and solved and scored across that
+    #     many numba threads. None or 1 (default) keeps the serial driver.
+    #     The parallel result is close to but not identical to the serial
+    #     one, and it buys latency on a single call rather than throughput -
+    #     leave it off when already running one process per core.
+    # batch_per_thread - hypotheses per thread in a batch; None (default)
+    #     uses ransac.DEFAULT_BATCH_PER_THREAD
     # returns (model, info) with model = {'F'} and info = {'inliers',
     # 'num_inliers', 'model_score', 'iterations', 'refinements'}; on total
     # failure model holds an all-zero placeholder F and
@@ -90,7 +100,8 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
     model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error * scale, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed)
+        lo_iterations=lo_iterations, seed=seed,
+        num_threads=num_threads, batch_per_thread=batch_per_thread)
 
     if num_inliers == 0:
         return {'F': np.zeros((3, 3))}, failure_info(len(x1), ransac_iterations)

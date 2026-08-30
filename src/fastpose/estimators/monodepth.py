@@ -125,7 +125,8 @@ def estimate_relative_pose_with_monodepth(
         iterations=1000, max_error=0.002, max_reproj_error=0.016,
         weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
-        final_refinement_iterations=100, final_loss='cauchy'):
+        final_refinement_iterations=100, final_loss='cauchy',
+        num_threads=None, batch_per_thread=None):
     # params:
     # x1, x2 - (n, 2) arrays of *calibrated* image points
     # d1, d2 - (n,) monocular depths per image (scale-invariant, or
@@ -149,6 +150,15 @@ def estimate_relative_pose_with_monodepth(
     #          'cauchy' (default) or 'truncated_cauchy'; a Loss object from
     #          refiners/losses.py is accepted too. The first call for a given
     #          loss compiles its LM kernel
+    # num_threads - >1 switches to the batched parallel RANSAC driver
+    #     (see estimators/ransac.py): hypotheses are drawn in batches of
+    #     num_threads * batch_per_thread and solved and scored across that
+    #     many numba threads. None or 1 (default) keeps the serial driver.
+    #     The parallel result is close to but not identical to the serial
+    #     one, and it buys latency on a single call rather than throughput -
+    #     leave it off when already running one process per core.
+    # batch_per_thread - hypotheses per thread in a batch; None (default)
+    #     uses ransac.DEFAULT_BATCH_PER_THREAD
     # returns (model, info) with model = {'R', 't', 'scale', 'shift1',
     # 'shift2'} (scale * (d2 + shift2) * x2h = R ((d1 + shift1) * x1h) + t
     # for inliers) and info = {'inliers', 'num_inliers', 'model_score',
@@ -170,7 +180,8 @@ def estimate_relative_pose_with_monodepth(
     model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed)
+        lo_iterations=lo_iterations, seed=seed,
+        num_threads=num_threads, batch_per_thread=batch_per_thread)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3), 'scale': 1.0,
@@ -222,7 +233,8 @@ def estimate_shared_focal_relative_pose_with_monodepth(
         iterations=1000, max_error=2.0, max_reproj_error=16.0,
         weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
-        final_refinement_iterations=100, final_loss='cauchy'):
+        final_refinement_iterations=100, final_loss='cauchy',
+        num_threads=None, batch_per_thread=None):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length
     # shared by both cameras; principal_point* optional (cx, cy), zero if
     # omitted. Thresholds in pixels. final_refinement_iterations is the LM
@@ -230,6 +242,15 @@ def estimate_shared_focal_relative_pose_with_monodepth(
     # inliers, independent of lo_iterations; defaults to 100, 0 disables the
     # pass. final_loss picks that pass's robust loss - 'truncated', 'cauchy'
     # (default) or 'truncated_cauchy', or a Loss object from
+    # num_threads - >1 switches to the batched parallel RANSAC driver
+    #     (see estimators/ransac.py): hypotheses are drawn in batches of
+    #     num_threads * batch_per_thread and solved and scored across that
+    #     many numba threads. None or 1 (default) keeps the serial driver.
+    #     The parallel result is close to but not identical to the serial
+    #     one, and it buys latency on a single call rather than throughput -
+    #     leave it off when already running one process per core.
+    # batch_per_thread - hypotheses per thread in a batch; None (default)
+    #     uses ransac.DEFAULT_BATCH_PER_THREAD
     # refiners/losses.py. Returns (model, info) with model = {'R', 't', 'f',
     # 'scale'} and
     # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
@@ -248,7 +269,8 @@ def estimate_shared_focal_relative_pose_with_monodepth(
     model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed)
+        lo_iterations=lo_iterations, seed=seed,
+        num_threads=num_threads, batch_per_thread=batch_per_thread)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3), 'f': 1.0, 'scale': 1.0},
@@ -296,7 +318,8 @@ def estimate_varying_focal_relative_pose_with_monodepth(
         iterations=1000, max_error=2.0, max_reproj_error=16.0,
         weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
-        final_refinement_iterations=100, final_loss='cauchy'):
+        final_refinement_iterations=100, final_loss='cauchy',
+        num_threads=None, batch_per_thread=None):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length per
     # camera; principal_point* optional (cx, cy), zero if omitted.
     # Thresholds in pixels. final_refinement_iterations is the LM step
@@ -305,6 +328,15 @@ def estimate_varying_focal_relative_pose_with_monodepth(
     # final_loss picks that pass's robust loss - 'truncated', 'cauchy'
     # (default) or 'truncated_cauchy', or a Loss object from
     # refiners/losses.py.
+    # num_threads - >1 switches to the batched parallel RANSAC driver
+    #     (see estimators/ransac.py): hypotheses are drawn in batches of
+    #     num_threads * batch_per_thread and solved and scored across that
+    #     many numba threads. None or 1 (default) keeps the serial driver.
+    #     The parallel result is close to but not identical to the serial
+    #     one, and it buys latency on a single call rather than throughput -
+    #     leave it off when already running one process per core.
+    # batch_per_thread - hypotheses per thread in a batch; None (default)
+    #     uses ransac.DEFAULT_BATCH_PER_THREAD
     # Returns (model, info) with model = {'R', 't', 'f1', 'f2', 'scale'} and
     # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
     # 'refinements'}; on total failure model holds the identity pose with
@@ -322,7 +354,8 @@ def estimate_varying_focal_relative_pose_with_monodepth(
     model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed)
+        lo_iterations=lo_iterations, seed=seed,
+        num_threads=num_threads, batch_per_thread=batch_per_thread)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3), 'f1': 1.0, 'f2': 1.0,

@@ -57,8 +57,8 @@ cannot warm up first, give each worker its own `NUMBA_CACHE_DIR` instead.
 
 Every `estimate_*` function takes correspondence arrays plus RANSAC options
 (`iterations`, `max_error`, `min_iterations` for adaptive termination,
-`lo_iterations` for the local-optimization budget, `seed`) and returns
-`(model, info)`:
+`lo_iterations` for the local-optimization budget, `seed`, and `num_threads`
+for [threading](#threading)) and returns `(model, info)`:
 
 - `model` is a dict holding the estimated quantities — `R`/`t` for pose
   problems, `F` for the fundamental matrix, plus `f`/`f1`/`f2` for the
@@ -116,6 +116,35 @@ function also accepts a `final_refinement_iterations` argument: an LM step
 budget for a final robust-loss polish pass over the RANSAC inliers (defaults
 to 100 iterations; 0 disables it), independent of `lo_iterations`. 
 The uncalibrated solvers assume principals at origina if they are not provided as optional params.
+
+### Threading
+
+Every `estimate_*` function also takes `num_threads` and `batch_per_thread`.
+The default (`num_threads=None`, or `1`) runs the single-threaded RANSAC
+driver. Anything higher switches to a batched parallel driver: hypotheses are
+drawn `num_threads * batch_per_thread` at a time and solved and scored across
+that many numba threads. `batch_per_thread` defaults to 32.
+
+```python
+model, info = estimate_relative_pose(x1, x2, camera1=K1, camera2=K2,
+                                     iterations=1000, max_error=2.0,
+                                     num_threads=8)
+```
+
+Measured on 8 physical cores at a 1000-iteration budget: **1.7–2.8×** end to
+end, the smaller figure at large point counts. The batched loop itself scales
+about 3.5–4×; local optimization and the final refinement stay single-threaded
+and cap the rest, and they cost more as the inlier count grows.
+
+Two caveats. This buys latency on one call, not throughput — if you already
+run one process per core (see [Multiprocessing](#multiprocessing)), threading
+inside each call only oversubscribes, so leave it off. And the parallel result
+is close to but not bit-identical to the serial one: every hypothesis in a
+batch is scored against the incumbent as it stood when the batch started, so
+models the serial driver would bail out of early can get scored in full. A run
+*is* reproducible from `(seed, num_threads * batch_per_thread)` regardless of
+how many threads actually run, and adaptive termination overshoots by at most
+one batch.
 
 `motion_from_essential` (also exported from `fastpose.estimators`) decomposes
 an externally estimated essential matrix into `(R, t)` candidates, for cases

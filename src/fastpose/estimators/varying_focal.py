@@ -64,12 +64,22 @@ def estimate_relative_pose_with_varying_focals(
         x1, x2, principal_point1=None, principal_point2=None,
         iterations=1000, max_error=2.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
-        final_refinement_iterations=100):
+        final_refinement_iterations=100, num_threads=None,
+        batch_per_thread=None):
     # x1, x2 are image coordinates in each camera's native pixel-like units.
     # principal_point* are optional (cx, cy); if omitted, zero is assumed.
     # final_refinement_iterations is the LM step budget for the final
     # Cauchy-loss polish pass on the RANSAC inliers, independent of
     # lo_iterations; defaults to 100, 0 disables the pass.
+    # num_threads - >1 switches to the batched parallel RANSAC driver
+    #     (see estimators/ransac.py): hypotheses are drawn in batches of
+    #     num_threads * batch_per_thread and solved and scored across that
+    #     many numba threads. None or 1 (default) keeps the serial driver.
+    #     The parallel result is close to but not identical to the serial
+    #     one, and it buys latency on a single call rather than throughput -
+    #     leave it off when already running one process per core.
+    # batch_per_thread - hypotheses per thread in a batch; None (default)
+    #     uses ransac.DEFAULT_BATCH_PER_THREAD
     # returns (model, info) with model = {'R', 't', 'f1', 'f2'} and
     # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
     # 'refinements'}; on total failure model holds the identity pose with
@@ -91,7 +101,8 @@ def estimate_relative_pose_with_varying_focals(
     model, _, num_inliers, ransac_iterations = estimator.estimate(
         data, len(x1), max_error * scale, iterations=iterations,
         min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed)
+        lo_iterations=lo_iterations, seed=seed,
+        num_threads=num_threads, batch_per_thread=batch_per_thread)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3), 'f1': 1.0, 'f2': 1.0},
