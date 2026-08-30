@@ -10,11 +10,42 @@ are outliers in both.
 import numpy as np
 from numba import njit
 
+from fastpose.scorers.sampson import SCORE_CHUNK
+
+
+@njit(cache=True, fastmath=True, inline='always')
+def _reprojection_block(x_x, x_y, X_x, X_y, X_z, start, count,
+                        r00, r01, r02, r10, r11, r12, r20, r21, r22,
+                        t0, t1, t2, max_error_sq):
+    # truncated (MSAC) reprojection score + inlier count over count points
+    # starting at start. Called with a literal count for every full block so
+    # the loop vectorizes; see SCORE_CHUNK in scorers/sampson.py
+    score = 0.0
+    num_inliers = 0
+    for j in range(count):
+        i = start + j
+        Xx = X_x[i]
+        Xy = X_y[i]
+        Xz = X_z[i]
+        zx = r00 * Xx + r01 * Xy + r02 * Xz + t0
+        zy = r10 * Xx + r11 * Xy + r12 * Xz + t1
+        zz = r20 * Xx + r21 * Xy + r22 * Xz + t2
+        dx = zx - x_x[i] * zz
+        dy = zy - x_y[i] * zz
+        r2 = dx * dx + dy * dy
+        zz_sq = zz * zz
+        if zz > 0.0 and r2 < max_error_sq * zz_sq:
+            score += r2 / zz_sq
+            num_inliers += 1
+        else:
+            score += max_error_sq
+    return score, num_inliers
+
 
 @njit(cache=True, fastmath=True)
 def reprojection_score(model, data, max_error_sq, best_score):
     # truncated (MSAC) reprojection score + inlier count in one fused pass
-    # with the same per-chunk early bail-out as the Sampson scorer; the
+    # with the same blocked early bail-out as the Sampson scorer; the
     # inlier test (zx - x*zz)^2 + (zy - y*zz)^2 < max_error_sq * zz^2 avoids
     # dividing for outliers
     x_x, x_y, X_x, X_y, X_z = data
@@ -32,31 +63,26 @@ def reprojection_score(model, data, max_error_sq, best_score):
     t1 = model[10]
     t2 = model[11]
 
-    chunk = 512
     score = 0.0
     num_inliers = 0
-    start = 0
-    while start < n:
-        end = min(start + chunk, n)
-        for i in range(start, end):
-            Xx = X_x[i]
-            Xy = X_y[i]
-            Xz = X_z[i]
-            zx = r00 * Xx + r01 * Xy + r02 * Xz + t0
-            zy = r10 * Xx + r11 * Xy + r12 * Xz + t1
-            zz = r20 * Xx + r21 * Xy + r22 * Xz + t2
-            dx = zx - x_x[i] * zz
-            dy = zy - x_y[i] * zz
-            r2 = dx * dx + dy * dy
-            zz_sq = zz * zz
-            if zz > 0.0 and r2 < max_error_sq * zz_sq:
-                score += r2 / zz_sq
-                num_inliers += 1
-            else:
-                score += max_error_sq
+    num_full = n // SCORE_CHUNK
+    for c in range(num_full):
+        block_score, block_inliers = _reprojection_block(
+            x_x, x_y, X_x, X_y, X_z, c * SCORE_CHUNK, SCORE_CHUNK,
+            r00, r01, r02, r10, r11, r12, r20, r21, r22, t0, t1, t2,
+            max_error_sq)
+        score += block_score
+        num_inliers += block_inliers
         if score >= best_score:
             return score, num_inliers
-        start = end
+    tail = n - num_full * SCORE_CHUNK
+    if tail > 0:
+        block_score, block_inliers = _reprojection_block(
+            x_x, x_y, X_x, X_y, X_z, num_full * SCORE_CHUNK, tail,
+            r00, r01, r02, r10, r11, r12, r20, r21, r22, t0, t1, t2,
+            max_error_sq)
+        score += block_score
+        num_inliers += block_inliers
     return score, num_inliers
 
 
@@ -82,31 +108,26 @@ def focal_reprojection_score(model, data, max_error_sq, best_score):
     t1 = f * model[10]
     t2 = model[11]
 
-    chunk = 512
     score = 0.0
     num_inliers = 0
-    start = 0
-    while start < n:
-        end = min(start + chunk, n)
-        for i in range(start, end):
-            Xx = X_x[i]
-            Xy = X_y[i]
-            Xz = X_z[i]
-            zx = r00 * Xx + r01 * Xy + r02 * Xz + t0
-            zy = r10 * Xx + r11 * Xy + r12 * Xz + t1
-            zz = r20 * Xx + r21 * Xy + r22 * Xz + t2
-            dx = zx - x_x[i] * zz
-            dy = zy - x_y[i] * zz
-            r2 = dx * dx + dy * dy
-            zz_sq = zz * zz
-            if zz > 0.0 and r2 < max_error_sq * zz_sq:
-                score += r2 / zz_sq
-                num_inliers += 1
-            else:
-                score += max_error_sq
+    num_full = n // SCORE_CHUNK
+    for c in range(num_full):
+        block_score, block_inliers = _reprojection_block(
+            x_x, x_y, X_x, X_y, X_z, c * SCORE_CHUNK, SCORE_CHUNK,
+            r00, r01, r02, r10, r11, r12, r20, r21, r22, t0, t1, t2,
+            max_error_sq)
+        score += block_score
+        num_inliers += block_inliers
         if score >= best_score:
             return score, num_inliers
-        start = end
+    tail = n - num_full * SCORE_CHUNK
+    if tail > 0:
+        block_score, block_inliers = _reprojection_block(
+            x_x, x_y, X_x, X_y, X_z, num_full * SCORE_CHUNK, tail,
+            r00, r01, r02, r10, r11, r12, r20, r21, r22, t0, t1, t2,
+            max_error_sq)
+        score += block_score
+        num_inliers += block_inliers
     return score, num_inliers
 
 
@@ -149,7 +170,7 @@ class FocalReprojectionScorer():
 # ---------------------------------------------------------------------------
 # loss-selectable cost kernels for the final refinement pass (LM accept/
 # reject only; RANSAC model selection above always stays truncated MSAC via
-# the *_score functions, so their early per-chunk bail-out stays valid).
+# the *_score functions, so their early per-block bail-out stays valid).
 # ---------------------------------------------------------------------------
 
 def build_reprojection_cost(loss):

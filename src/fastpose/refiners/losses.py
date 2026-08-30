@@ -11,7 +11,7 @@ threshold `max_error_sq`:
     cost(r2, max_error_sq) -> robustified per-residual cost
         summed by the LM loop's accept/reject test (refiners/lm.py) and by
         the cost kernels built in scorers/; monotonically increasing in r2
-        so the scorers' per-chunk early bail-out stays valid
+        so the scorers' per-block early bail-out stays valid
 
 Both are plain njit functions wrapped in `staticmethod` so refiner/scorer
 factories can close over them as compile-time constants, the same pattern

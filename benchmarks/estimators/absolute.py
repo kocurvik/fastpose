@@ -79,10 +79,12 @@ def evaluate_maa(num_scenes=100, num_samples=5000, noise_sigma=2.0,
                 times[method].append(time.perf_counter() - start)
                 errors[method].append(err)
 
-            # poselib 3.0 expects RANSAC options nested under 'ransac'
-            # (a flat dict is silently ignored)
-            ransac_options = {'ransac': {'max_reproj_error': max_error,
-                                         'min_iterations': iters,
+            # poselib 3.0 takes the iteration budget nested under 'ransac' (a
+            # flat dict is silently ignored) but the inlier threshold as a
+            # top-level 'max_error'; 'max_reproj_error' is silently ignored in
+            # both places, leaving poselib on its default threshold.
+            ransac_options = {'max_error': max_error,
+                              'ransac': {'min_iterations': iters,
                                          'max_iterations': iters}}
             start = time.perf_counter()
             # poselib 3.0 returns an Image (pose + camera)
@@ -120,12 +122,16 @@ def run_scaling_benchmark():
 
     camera = {'model': 'PINHOLE', 'width': int(image_size), 'height': int(image_size),
               'params': [focal, focal, image_size / 2, image_size / 2]}
-    # poselib 3.0 expects RANSAC options nested under 'ransac'
-    ransac_options = {'ransac': {
-        'max_reproj_error': max_error,
-        'max_iterations': iterations,
-        'min_iterations': iterations,
-    }}
+    # poselib 3.0 takes the iteration budget nested under 'ransac' but the
+    # inlier threshold as a top-level 'max_error'; 'max_reproj_error' is
+    # silently ignored in both places.
+    ransac_options = {
+        'max_error': max_error,
+        'ransac': {
+            'max_iterations': iterations,
+            'min_iterations': iterations,
+        },
+    }
 
     rng = np.random.default_rng(0)
     x_w, X_w, _, _ = generate_abspose_data(rng, 100)

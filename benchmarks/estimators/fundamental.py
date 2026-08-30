@@ -82,10 +82,12 @@ def evaluate_maa(num_scenes=100, num_samples=5000, noise_sigma=3.0,
                 errors[method].append(_pose_error_from_f(
                     model['F'], est_info['inliers'], x1n, x2n, K, R_gt, t_gt))
 
-            # poselib 3.0 expects RANSAC options nested under 'ransac'
-            # (a flat dict is silently ignored)
-            ransac_options = {'ransac': {'max_epipolar_error': max_error,
-                                         'min_iterations': iters,
+            # poselib 3.0 takes the iteration budget nested under 'ransac' (a
+            # flat dict is silently ignored) but the inlier threshold as a
+            # top-level 'max_error'; 'max_epipolar_error' is silently ignored
+            # in both places, leaving poselib on its default threshold.
+            ransac_options = {'max_error': max_error,
+                              'ransac': {'min_iterations': iters,
                                          'max_iterations': iters}}
             start = time.perf_counter()
             F, info = poselib.estimate_fundamental(x1, x2, ransac_options)
@@ -117,13 +119,17 @@ def run_scaling_benchmark():
     max_error = 2.0
     repeats = 5
 
-    # poselib 3.0 expects RANSAC options nested under 'ransac'
-    # (a flat dict is silently ignored)
-    ransac_options = {'ransac': {
-        'max_epipolar_error': max_error,
-        'max_iterations': iterations,
-        'min_iterations': iterations,
-    }}
+    # poselib 3.0 takes the iteration budget nested under 'ransac' (a flat
+    # dict is silently ignored) but the inlier threshold as a top-level
+    # 'max_error'; 'max_epipolar_error' is silently ignored in both places,
+    # leaving poselib on its default threshold.
+    ransac_options = {
+        'max_error': max_error,
+        'ransac': {
+            'max_iterations': iterations,
+            'min_iterations': iterations,
+        },
+    }
 
     # warm up the JIT so compilation time is not measured
     rng = np.random.default_rng(0)
@@ -293,8 +299,9 @@ def evaluate_shared_focal_maa(num_scenes=100, num_samples=5000,
 
             # poselib's shared-focal binding accepts a single principal point,
             # so compare in principal-point-centered coordinates with pp = 0.
-            ransac_options = {'ransac': {'max_epipolar_error': max_error,
-                                         'min_iterations': iters,
+            # Threshold goes top-level as 'max_error' (see above).
+            ransac_options = {'max_error': max_error,
+                              'ransac': {'min_iterations': iters,
                                          'max_iterations': iters}}
             start = time.perf_counter()
             image_pair, info = poselib.estimate_shared_focal_relative_pose(

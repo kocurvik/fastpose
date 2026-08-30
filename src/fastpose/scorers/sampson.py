@@ -26,45 +26,72 @@ import numpy as np
 from numba import njit
 
 
+# points per early-bail-out check. The block helpers below are called with
+# this as a literal for every full block, so after inlining LLVM sees a
+# constant trip count and vectorizes the body; a `for i in range(start, end)`
+# with a runtime `end` does not vectorize (it compiles to a mostly scalar
+# loop, which cost ~2x on the O(ransac_iterations x n) scorers).
+SCORE_CHUNK = 512
+
+
+@njit(cache=True, fastmath=True, inline='always')
+def _sampson_block(f, x1_x, x1_y, x2_x, x2_y, start, count, max_error_sq):
+    # truncated (MSAC) Sampson score + inlier count over count points
+    # starting at start
+    score = 0.0
+    num_inliers = 0
+    for j in range(count):
+        i = start + j
+        x = x1_x[i]
+        y = x1_y[i]
+        xp = x2_x[i]
+        yp = x2_y[i]
+        fx1_0 = f[0] * x + f[1] * y + f[2]
+        fx1_1 = f[3] * x + f[4] * y + f[5]
+        fx1_2 = f[6] * x + f[7] * y + f[8]
+        ftx2_0 = f[0] * xp + f[3] * yp + f[6]
+        ftx2_1 = f[1] * xp + f[4] * yp + f[7]
+        residual = xp * fx1_0 + yp * fx1_1 + fx1_2
+        denominator = fx1_0 * fx1_0 + fx1_1 * fx1_1 + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1
+        r2 = residual * residual
+        # r2 / denominator < max_error_sq, without dividing for outliers.
+        # Degenerate models can make the Sampson denominator exactly zero;
+        # keep those points in the outlier branch instead of dividing.
+        if denominator > 0.0 and r2 < max_error_sq * denominator:
+            score += r2 / denominator
+            num_inliers += 1
+        else:
+            score += max_error_sq
+    return score, num_inliers
+
+
 @njit(cache=True, fastmath=True)
 def sampson_score(f, data, max_error_sq, best_score):
     # truncated (MSAC) Sampson score + inlier count in one fused pass;
     # the truncated score only grows with each point, so once the partial
     # score exceeds the best score so far the model cannot win and scoring
-    # can stop early (exact, loss-free bail-out). Checked per chunk to keep
-    # the inner loop vectorizable.
+    # can stop early (exact, loss-free bail-out). Checked per SCORE_CHUNK
+    # points.
     x1_x, x1_y, x2_x, x2_y = data
     n = x1_x.shape[0]
-    chunk = 512
     score = 0.0
     num_inliers = 0
-    start = 0
-    while start < n:
-        end = min(start + chunk, n)
-        for i in range(start, end):
-            x = x1_x[i]
-            y = x1_y[i]
-            xp = x2_x[i]
-            yp = x2_y[i]
-            fx1_0 = f[0] * x + f[1] * y + f[2]
-            fx1_1 = f[3] * x + f[4] * y + f[5]
-            fx1_2 = f[6] * x + f[7] * y + f[8]
-            ftx2_0 = f[0] * xp + f[3] * yp + f[6]
-            ftx2_1 = f[1] * xp + f[4] * yp + f[7]
-            residual = xp * fx1_0 + yp * fx1_1 + fx1_2
-            denominator = fx1_0 * fx1_0 + fx1_1 * fx1_1 + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1
-            r2 = residual * residual
-            # r2 / denominator < max_error_sq, without dividing for outliers.
-            # Degenerate models can make the Sampson denominator exactly zero;
-            # keep those points in the outlier branch instead of dividing.
-            if denominator > 0.0 and r2 < max_error_sq * denominator:
-                score += r2 / denominator
-                num_inliers += 1
-            else:
-                score += max_error_sq
+    num_full = n // SCORE_CHUNK
+    for c in range(num_full):
+        block_score, block_inliers = _sampson_block(
+            f, x1_x, x1_y, x2_x, x2_y, c * SCORE_CHUNK, SCORE_CHUNK,
+            max_error_sq)
+        score += block_score
+        num_inliers += block_inliers
         if score >= best_score:
             return score, num_inliers
-        start = end
+    tail = n - num_full * SCORE_CHUNK
+    if tail > 0:
+        block_score, block_inliers = _sampson_block(
+            f, x1_x, x1_y, x2_x, x2_y, num_full * SCORE_CHUNK, tail,
+            max_error_sq)
+        score += block_score
+        num_inliers += block_inliers
     return score, num_inliers
 
 
@@ -174,46 +201,64 @@ def cheirality_ok(pose, x, y, xp, yp, min_depth):
     return depth1 > thr and depth2 > thr
 
 
+@njit(cache=True, fastmath=True, inline='always')
+def _cheirality_block(model, e, x1_x, x1_y, x2_x, x2_y, start, count,
+                      max_error_sq):
+    score = 0.0
+    num_inliers = 0
+    for j in range(count):
+        i = start + j
+        x = x1_x[i]
+        y = x1_y[i]
+        xp = x2_x[i]
+        yp = x2_y[i]
+        ex1_0 = e[0] * x + e[1] * y + e[2]
+        ex1_1 = e[3] * x + e[4] * y + e[5]
+        ex1_2 = e[6] * x + e[7] * y + e[8]
+        etx2_0 = e[0] * xp + e[3] * yp + e[6]
+        etx2_1 = e[1] * xp + e[4] * yp + e[7]
+        residual = xp * ex1_0 + yp * ex1_1 + ex1_2
+        denominator = (ex1_0 * ex1_0 + ex1_1 * ex1_1
+                       + etx2_0 * etx2_0 + etx2_1 * etx2_1)
+        r2 = residual * residual
+        if (denominator > 0.0 and r2 < max_error_sq * denominator
+                and cheirality_ok(model, x, y, xp, yp, MIN_DEPTH)):
+            score += r2 / denominator
+            num_inliers += 1
+        else:
+            score += max_error_sq
+    return score, num_inliers
+
+
 @njit(cache=True, fastmath=True)
 def pose_sampson_cheirality_score(model, data, max_error_sq, best_score):
     # poselib's compute_sampson_msac_score(CameraPose, ...): the truncated
     # Sampson score of E = [t]_x R, with a point counted as an inlier (and
     # charged its own residual rather than the truncation constant) only if
-    # it also triangulates in front of both cameras. Same chunked early
+    # it also triangulates in front of both cameras. Same blocked early
     # bail-out as sampson_score - the score still only grows.
     x1_x, x1_y, x2_x, x2_y = data
     e = np.empty(9)
     essential_from_pose(model, e)
     n = x1_x.shape[0]
-    chunk = 512
     score = 0.0
     num_inliers = 0
-    start = 0
-    while start < n:
-        end = min(start + chunk, n)
-        for i in range(start, end):
-            x = x1_x[i]
-            y = x1_y[i]
-            xp = x2_x[i]
-            yp = x2_y[i]
-            ex1_0 = e[0] * x + e[1] * y + e[2]
-            ex1_1 = e[3] * x + e[4] * y + e[5]
-            ex1_2 = e[6] * x + e[7] * y + e[8]
-            etx2_0 = e[0] * xp + e[3] * yp + e[6]
-            etx2_1 = e[1] * xp + e[4] * yp + e[7]
-            residual = xp * ex1_0 + yp * ex1_1 + ex1_2
-            denominator = (ex1_0 * ex1_0 + ex1_1 * ex1_1
-                           + etx2_0 * etx2_0 + etx2_1 * etx2_1)
-            r2 = residual * residual
-            if (denominator > 0.0 and r2 < max_error_sq * denominator
-                    and cheirality_ok(model, x, y, xp, yp, MIN_DEPTH)):
-                score += r2 / denominator
-                num_inliers += 1
-            else:
-                score += max_error_sq
+    num_full = n // SCORE_CHUNK
+    for c in range(num_full):
+        block_score, block_inliers = _cheirality_block(
+            model, e, x1_x, x1_y, x2_x, x2_y, c * SCORE_CHUNK, SCORE_CHUNK,
+            max_error_sq)
+        score += block_score
+        num_inliers += block_inliers
         if score >= best_score:
             return score, num_inliers
-        start = end
+    tail = n - num_full * SCORE_CHUNK
+    if tail > 0:
+        block_score, block_inliers = _cheirality_block(
+            model, e, x1_x, x1_y, x2_x, x2_y, num_full * SCORE_CHUNK, tail,
+            max_error_sq)
+        score += block_score
+        num_inliers += block_inliers
     return score, num_inliers
 
 
@@ -388,7 +433,7 @@ class SharedFocalPoseSampsonScorer():
 # ---------------------------------------------------------------------------
 # loss-selectable cost kernels for the final refinement pass (LM accept/
 # reject only; RANSAC model selection above always stays truncated MSAC via
-# the *_score functions, so their early per-chunk bail-out stays valid).
+# the *_score functions, so their early per-block bail-out stays valid).
 # ---------------------------------------------------------------------------
 
 def build_sampson_cost(loss):

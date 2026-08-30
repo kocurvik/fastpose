@@ -8,9 +8,8 @@ varying-focal variants), absolute pose (P3P/P4Pf), and monocular-depth-assisted
 relative pose — all built on one [numba](https://numba.pydata.org/)-compiled
 LO-RANSAC engine and benchmarked against PoseLib (C++).
 
-On synthetic data, fastpose matches or beats PoseLib's runtime while landing
-similar or better accuracy; see [BENCHMARKS.md](TESTS) to reproduce
-this and for tests. Real-data numbers are coming later.
+See [TESTS.md](TESTS.md) for the tests and for the synthetic benchmarks that
+compare against PoseLib. Real-data numbers are coming later.
 
 ## Install
 
@@ -222,8 +221,10 @@ The one deliberate removal is the shared-focal solver, below.
   companion-matrix eigendecomposition.
 - **Fused single-pass MSAC scoring** with an exact early bail-out: the
   truncated score only grows, so scoring stops as soon as the partial score
-  exceeds the best score so far (checked per 512-point chunk to keep the loop
-  SIMD-vectorized).
+  exceeds the best score so far (checked per 512-point block). Each full
+  block runs with a compile-time-constant trip count so LLVM SIMD-vectorizes
+  the body; a loop bounded by a runtime `min(start + chunk, n)` does not
+  vectorize and costs about 2x here.
 - **LO-RANSAC with Levenberg-Marquardt**: whenever a new best model is found,
   LM minimizes the truncated Sampson error over its inliers, with F
   parametrized by its SVD factorization `F = U diag(1, sigma, 0) V^T` (7
@@ -365,7 +366,7 @@ principal points:
   are polished with a few Newton steps before the pose is assembled — no
   eigendecomposition anywhere.
 - **Truncated reprojection scorer** (`src/fastpose/scorers/reprojection.py`):
-  fused MSAC scoring with the same exact per-chunk early bail-out as the
+  fused MSAC scoring with the same exact per-block early bail-out as the
   Sampson scorers; the inlier test is division-free and points behind the
   camera count as outliers.
 - **LM refiner on the pose directly** (`src/fastpose/refiners/absolute.py`):
@@ -393,7 +394,7 @@ correspondences in pixel coordinates (square pixels, known principal point):
 - **Truncated focal reprojection scorer**
   (`src/fastpose/scorers/reprojection.py`): the `[R | t]` scorer with the
   focal folded into the projection, same division-free inlier test and
-  per-chunk early bail-out.
+  per-block early bail-out.
 - **LM refiner** (`src/fastpose/refiners/absolute_focal.py`): 7 tangent
   parameters (rotation, translation, log-focal) with an analytic jacobian.
 
