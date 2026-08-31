@@ -181,7 +181,13 @@ def svd_init_state(model, state):
     M = np.empty((3, 3))
     for i in range(3):
         for j in range(3):
-            M[i, j] = model[3 * i + j]
+            v = model[3 * i + j]
+            # LAPACK's only failure mode on a 3x3 is non-finite input, where
+            # np.linalg.svd raises - and an exception cannot propagate out of
+            # the parallel RANSAC driver (numba turns it into SystemError)
+            if not math.isfinite(v):
+                return False
+            M[i, j] = v
     U, s, Vt = np.linalg.svd(M)
     if s[1] <= 0.0:
         return False

@@ -22,10 +22,54 @@ The returned kernel has the RANSAC refiner signature
 `refine(data, model, refined, max_error_sq, num_iterations) -> bool`.
 """
 
+import math
+
 import numpy as np
 from numba import njit
 
 from fastpose.kernel_cache import stabilize
+
+
+@njit(cache=True)
+def _solve_damped(A, Jtr, delta, n):
+    # Cholesky solve of A delta = -Jtr, in place on A (scratch). Returns False
+    # for a non-positive or non-finite pivot - a singular or NaN/inf system -
+    # where np.linalg.solve would raise LinAlgError. Raising is not an option
+    # here: refine kernels run inside the parallel RANSAC driver, and numba
+    # cannot propagate an exception out of a parallel=True function (it
+    # surfaces as SystemError and kills the whole estimate). Deliberately not
+    # fastmath so the pivot check is honest about NaN.
+    for j in range(n):
+        d = A[j, j]
+        for k in range(j):
+            d -= A[j, k] * A[j, k]
+        if not (d > 0.0) or not math.isfinite(d):
+            return False
+        d = math.sqrt(d)
+        A[j, j] = d
+        inv = 1.0 / d
+        for i in range(j + 1, n):
+            s = A[i, j]
+            for k in range(j):
+                s -= A[i, k] * A[j, k]
+            A[i, j] = s * inv
+    # forward substitution L y = -Jtr, then back substitution L^T delta = y
+    for i in range(n):
+        s = -Jtr[i]
+        for k in range(i):
+            s -= A[i, k] * delta[k]
+        delta[i] = s / A[i, i]
+    for i in range(n - 1, -1, -1):
+        s = delta[i]
+        for k in range(i + 1, n):
+            s -= A[k, i] * delta[k]
+        delta[i] = s / A[i, i]
+    # a finite factorization can still produce a non-finite step when Jtr
+    # itself carries inf; the fastmath caller cannot test that reliably
+    for i in range(n):
+        if not math.isfinite(delta[i]):
+            return False
+    return True
 
 
 def build_lm_refine(init_state, state_to_model, accumulate, apply_step, cost,
@@ -52,6 +96,7 @@ def build_lm_refine(init_state, state_to_model, accumulate, apply_step, cost,
         JtJ = np.empty((num_tangent, num_tangent))
         Jtr = np.empty(num_tangent)
         A = np.empty((num_tangent, num_tangent))
+        delta = np.empty(num_tangent)
 
         lam = 1e-4
         recompute_jacobian = True
@@ -66,7 +111,15 @@ def build_lm_refine(init_state, state_to_model, accumulate, apply_step, cost,
                 for q in range(num_tangent):
                     A[p, q] = JtJ[p, q]
                 A[p, p] += lam
-            delta = np.linalg.solve(A, -Jtr)
+            if not _solve_damped(A, Jtr, delta, num_tangent):
+                # singular or non-finite normal equations: treat it as a
+                # rejected step so a garbage model runs the damping schedule
+                # dry instead of aborting the whole RANSAC call
+                lam = lam * 10.0
+                recompute_jacobian = False
+                if lam > 1e10:
+                    break
+                continue
 
             step_sq = 0.0
             for p in range(num_tangent):
