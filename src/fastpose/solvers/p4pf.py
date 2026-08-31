@@ -117,7 +117,8 @@ def build_p4pf_kernels(jit, real_roots_sturm):
                       + coeffs[2, 6] * x + coeffs[2, 7] * y
                       + coeffs[2, 8] * z + coeffs[2, 9])
                 # spelled out rather than `max(...)`: numba 0.67 cannot
-                # compile the builtin for CUDA at all (see Instructions.md)
+                # compile the builtin for CUDA at all (see Instructions.md
+                # on the `cuda-backend` branch)
                 worst = abs(r0)
                 ar1 = abs(r1)
                 if ar1 > worst:
@@ -725,7 +726,8 @@ def build_p4pf_kernels(jit, real_roots_sturm):
             # keep the solution closest to square pixels (fx ~ fy)
             a = fx / fy
             # spelled out rather than `max(...)`: numba 0.67 cannot compile
-            # the builtin for CUDA at all (see Instructions.md)
+            # the builtin for CUDA at all (see Instructions.md on the
+            # `cuda-backend` branch)
             err = abs(a - 1.0)
             err_inv = abs(1.0 / a - 1.0)
             if err_inv > err:

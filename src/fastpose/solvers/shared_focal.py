@@ -210,7 +210,7 @@ _AM_IND = np.array((               # 0..19, action-matrix source rows
 # The eight action-matrix rows `_fast_eigenvector_solution` reads. This used to
 # be a tuple literal indexed by the loop variable; module-level numpy arrays
 # read as constants are known to work in device code, dynamic indexing of a
-# tuple is not (Instructions.md section 1).
+# tuple is not (Instructions.md section 1, on the `cuda-backend` branch).
 _EIG_IND = np.array((2, 3, 4, 6, 8, 9, 11, 14), dtype=np.int8)
 
 _COEFF_TERM_START = np.array((     # 0..2520, term-table offsets

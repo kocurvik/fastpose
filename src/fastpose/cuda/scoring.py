@@ -31,8 +31,8 @@ there is only ever one copy of the per-point math:
 
 Precision is mixed exactly as in the first port: the derived form is built and
 the score accumulated in float64, the rounded mirrors and every per-point
-expression are float32. See Instructions.md section 4 for the measurements
-behind that split.
+expression are float32. See Instructions.md section 4 on the `cuda-backend`
+branch for the measurements behind that split.
 
 The early bail-out is kept, which is not obvious for a block reduction: the
 truncated score is a sum of non-negative terms, so any partial sum is a lower

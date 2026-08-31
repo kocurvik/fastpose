@@ -92,7 +92,8 @@ class Case():
     `data` is the tuple the CPU solver/scorer/refiner take, `cols` the
     coordinate columns the device kernels take. They differ only for
     varying-focal, whose principal points ride in `params` on the GPU (see
-    Instructions.md section 2.4) and in the `data` tuple on the CPU.
+    Instructions.md section 2.4 on the `cuda-backend` branch) and in the
+    `data` tuple on the CPU.
     """
 
     def __init__(self, name, data, cols, params, max_error_sq, solver,

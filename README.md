@@ -211,8 +211,7 @@ reproduce the CPU result bit for bit:
 Accuracy is held to the CPU path rather than assumed equal to it:
 `tests/test_cuda.py` checks every kernel against its CPU counterpart and
 asserts model-selection and minimizer *quality* directly, not element-wise
-tolerances alone. `Instructions.md` has the precision split, what it cost, and
-the rest of the backend's internals.
+tolerances alone.
 
 #### `batch`
 

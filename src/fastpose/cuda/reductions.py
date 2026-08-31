@@ -8,7 +8,8 @@ second copy with a different `NUM_TANGENT` baked in.
 
 Every reduction here is called by *all* threads of the block and contains a
 `cuda.syncthreads()`, so a caller must never place one inside a branch that
-only some threads take (see the block-uniformity note in Instructions.md).
+only some threads take (see the block-uniformity note in Instructions.md on
+the `cuda-backend` branch).
 """
 
 import math
