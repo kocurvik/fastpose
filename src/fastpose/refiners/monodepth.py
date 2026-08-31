@@ -22,17 +22,28 @@ shifts / focals are plain additive parameters like in poselib:
 - calibrated:      [w(3), dt(3), dscale] (+ [dshift1, dshift2] with shift)
 - shared focal:    [w(3), dt(3), dscale, df]
 - varying focal:   [w(3), dt(3), dscale, df1, df2]
+
+The per-point maths - the two reprojection residuals and their jacobian rows,
+the E -> F map and the tangent basis - is built by
+`build_monodepth_primitives` / `build_monodepth_reproj_kernels` so the same
+source compiles for the CPU (`njit`) and for CUDA
+(`cuda.jit(device=True)`); the accumulate kernels below are thin loops over
+them. The Sampson residual and its jacobian are *not* redefined here: they
+are the same `sampson_residual` / `sampson_point_jacobian` every other
+refiner uses.
 """
 
 import math
 
 import numpy as np
-from numba import njit
+from numba import float64, njit
 
+from fastpose.jit_backend import cpu_jit
 from fastpose.refiners.lm import build_lm_refine
 from fastpose.refiners.losses import TruncatedLoss, get_loss
-from fastpose.refiners.utils import mat3_mul, rodrigues
-from fastpose.scorers.sampson import essential_from_pose
+from fastpose.refiners.utils import (mat3_mul, rodrigues,
+                                     sampson_point_jacobian)
+from fastpose.scorers.sampson import essential_from_pose, sampson_residual
 
 STATE_SIZE = 15
 MODEL_SIZE = 15
@@ -113,98 +124,356 @@ def _apply_step_varying_focal(state, delta, state_new):
     state_new[14] = state[14] + delta[6]
 
 
-@njit(cache=True, inline='always', fastmath=True)
-def _focal_fundamental(e, f1, f2, f):
-    # F = diag(1, 1, f2) E diag(1, 1, f1), proportional to K2^-T E K1^-1, so
-    # the Sampson error matches the scorer's; this is the parametrization
-    # poselib differentiates
-    f[0] = e[0]
-    f[1] = e[1]
-    f[2] = f1 * e[2]
-    f[3] = e[3]
-    f[4] = e[4]
-    f[5] = f1 * e[5]
-    f[6] = f2 * e[6]
-    f[7] = f2 * e[7]
-    f[8] = f1 * f2 * e[8]
+def build_monodepth_primitives(jit, real=float64):
+    # `real` types the float literals, so the CUDA refiner can build these in
+    # float32 without a bare `1.0` silently promoting the chain back to
+    # float64; see build_sampson_point_kernels for the full rationale.
+    @jit(fastmath=True, inline=True)
+    def focal_fundamental(e, f1, f2, f):
+        # F = diag(1, 1, f2) E diag(1, 1, f1), proportional to K2^-T E K1^-1,
+        # so the Sampson error matches the scorer's; this is the
+        # parametrization poselib differentiates
+        f[0] = e[0]
+        f[1] = e[1]
+        f[2] = f1 * e[2]
+        f[3] = e[3]
+        f[4] = e[4]
+        f[5] = f1 * e[5]
+        f[6] = f2 * e[6]
+        f[7] = f2 * e[7]
+        f[8] = f1 * f2 * e[8]
+
+    @jit(fastmath=True, inline=True)
+    def essential_tangent_rows(e, model, B, nt):
+        # rows 0..2 of B: dE/dw_k = E skew(e_k) (retraction R exp([w]_x));
+        # rows 3..5: dE/dt_k = skew(e_k) R; remaining rows zeroed.
+        #
+        # Not the same map as refiners/utils.py's essential_tangent_rows_core:
+        # there the translation is confined to the unit sphere and gets two
+        # tangent directions, here the depths fix the scale and t gets three
+        # additive ones.
+        zero = real(0.0)
+        for j in range(3):
+            B[0, 3 * j] = zero
+            B[0, 3 * j + 1] = e[3 * j + 2]
+            B[0, 3 * j + 2] = -e[3 * j + 1]
+            B[1, 3 * j] = -e[3 * j + 2]
+            B[1, 3 * j + 1] = zero
+            B[1, 3 * j + 2] = e[3 * j]
+            B[2, 3 * j] = e[3 * j + 1]
+            B[2, 3 * j + 1] = -e[3 * j]
+            B[2, 3 * j + 2] = zero
+        for j in range(3):
+            B[3, j] = zero
+            B[3, 3 + j] = -model[6 + j]
+            B[3, 6 + j] = model[3 + j]
+            B[4, j] = model[6 + j]
+            B[4, 3 + j] = zero
+            B[4, 6 + j] = -model[j]
+            B[5, j] = -model[3 + j]
+            B[5, 3 + j] = model[j]
+            B[5, 6 + j] = zero
+        for p in range(6, nt):
+            for j in range(9):
+                B[p, j] = zero
+
+    @jit(fastmath=True, inline=True)
+    def focal_tangent_rows(e, f1, f2, B, shared):
+        # the focal columns of dF/dtheta, and the diag(1,1,f2).diag(1,1,f1)
+        # rescaling the pose columns pick up on the way from E to F
+        for p in range(6):
+            B[p, 2] *= f1
+            B[p, 5] *= f1
+            B[p, 6] *= f2
+            B[p, 7] *= f2
+            B[p, 8] *= f1 * f2
+        if shared:
+            # dF/df with f1 = f2 = f
+            B[7, 2] = e[2]
+            B[7, 5] = e[5]
+            B[7, 6] = e[6]
+            B[7, 7] = e[7]
+            B[7, 8] = real(2.0) * f1 * e[8]
+        else:
+            B[7, 2] = e[2]
+            B[7, 5] = e[5]
+            B[7, 8] = f2 * e[8]
+            B[8, 6] = e[6]
+            B[8, 7] = e[7]
+            B[8, 8] = f1 * e[8]
+
+    return {
+        'focal_fundamental': focal_fundamental,
+        'essential_tangent_rows': essential_tangent_rows,
+        'focal_tangent_rows': focal_tangent_rows,
+    }
 
 
-@njit(cache=True, inline='always', fastmath=True)
-def _essential_tangent_rows(e, model, B, nt):
-    # rows 0..2 of B: dE/dw_k = E skew(e_k) (retraction R exp([w]_x));
-    # rows 3..5: dE/dt_k = skew(e_k) R; remaining rows zeroed
-    for j in range(3):
-        B[0, 3 * j] = 0.0
-        B[0, 3 * j + 1] = e[3 * j + 2]
-        B[0, 3 * j + 2] = -e[3 * j + 1]
-        B[1, 3 * j] = -e[3 * j + 2]
-        B[1, 3 * j + 1] = 0.0
-        B[1, 3 * j + 2] = e[3 * j]
-        B[2, 3 * j] = e[3 * j + 1]
-        B[2, 3 * j + 1] = -e[3 * j]
-        B[2, 3 * j + 2] = 0.0
-    for j in range(3):
-        B[3, j] = 0.0
-        B[3, 3 + j] = -model[6 + j]
-        B[3, 6 + j] = model[3 + j]
-        B[4, j] = model[6 + j]
-        B[4, 3 + j] = 0.0
-        B[4, 6 + j] = -model[j]
-        B[5, j] = -model[3 + j]
-        B[5, 3 + j] = model[j]
-        B[5, 6 + j] = 0.0
-    for p in range(6, nt):
-        for j in range(9):
-            B[p, j] = 0.0
+def build_monodepth_residual_kernels(jit, real=float64, focal=False):
+    """The two monodepth reprojection residuals, without their jacobians.
+
+    The cost evaluation is O(n) per LM trial step and needs only `(rx, ry)`,
+    so it does not pay for the jacobian rows. Same split as
+    `sampson_residual` versus `sampson_point_jacobian`.
+    """
+
+    @jit(fastmath=True, inline=True)
+    def forward_residual(m, x, y, xp, yp, di):
+        zero = real(0.0)
+        if focal:
+            inv_f1 = real(1.0) / m[12]
+            X1x = di * x * inv_f1
+            X1y = di * y * inv_f1
+            X1z = di
+        else:
+            z1 = di + m[13]
+            X1x = z1 * x
+            X1y = z1 * y
+            X1z = z1
+        Z1x = m[0] * X1x + m[1] * X1y + m[2] * X1z + m[9]
+        Z1y = m[3] * X1x + m[4] * X1y + m[5] * X1z + m[10]
+        Z1z = m[6] * X1x + m[7] * X1y + m[8] * X1z + m[11]
+        if Z1z <= zero:
+            return zero, zero, False
+        inv_z = real(1.0) / Z1z
+        if focal:
+            f2 = m[13]
+            return (f2 * Z1x * inv_z - xp, f2 * Z1y * inv_z - yp, True)
+        return Z1x * inv_z - xp, Z1y * inv_z - yp, True
+
+    @jit(fastmath=True, inline=True)
+    def backward_residual(m, x, y, xp, yp, di):
+        zero = real(0.0)
+        if focal:
+            inv_f2 = real(1.0) / m[13]
+            s = m[14]
+            X2sx = di * xp * inv_f2
+            X2sy = di * yp * inv_f2
+            X2sz = di
+        else:
+            s = m[12]
+            w2 = di + m[14]
+            X2sx = w2 * xp
+            X2sy = w2 * yp
+            X2sz = w2
+        X2tx = s * X2sx - m[9]
+        X2ty = s * X2sy - m[10]
+        X2tz = s * X2sz - m[11]
+        Z2x = m[0] * X2tx + m[3] * X2ty + m[6] * X2tz
+        Z2y = m[1] * X2tx + m[4] * X2ty + m[7] * X2tz
+        Z2z = m[2] * X2tx + m[5] * X2ty + m[8] * X2tz
+        if Z2z <= zero:
+            return zero, zero, False
+        inv_z = real(1.0) / Z2z
+        if focal:
+            f1 = m[12]
+            return (f1 * Z2x * inv_z - x, f1 * Z2y * inv_z - y, True)
+        return Z2x * inv_z - x, Z2y * inv_z - y, True
+
+    return {'forward_residual': forward_residual,
+            'backward_residual': backward_residual}
 
 
-@njit(cache=True, inline='always', fastmath=True)
-def _sampson_dsdF(x, y, xp, yp, f, dsdF):
-    # Sampson residual of one correspondence for the flat 3x3 matrix f, plus
-    # its gradient w.r.t. the matrix entries (row-major). Returns
-    # (residual, valid); valid is False only for a degenerate denominator.
-    # Callers weight the residual themselves via loss.weight(s_i^2, ...).
-    fx1_0 = f[0] * x + f[1] * y + f[2]
-    fx1_1 = f[3] * x + f[4] * y + f[5]
-    fx1_2 = f[6] * x + f[7] * y + f[8]
-    ftx2_0 = f[0] * xp + f[3] * yp + f[6]
-    ftx2_1 = f[1] * xp + f[4] * yp + f[7]
-    residual = xp * fx1_0 + yp * fx1_1 + fx1_2
-    denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
-                   + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
-    if denominator <= 0.0:
-        return 0.0, False
+def build_monodepth_reproj_kernels(jit, real=float64, num_tangent=7,
+                                   focal=False):
+    """The two monodepth reprojection residuals and their jacobian rows.
 
-    inv_sqrt_den = 1.0 / math.sqrt(denominator)
-    c = residual * inv_sqrt_den / denominator
-    s_i = residual * inv_sqrt_den
-    dsdF[0] = inv_sqrt_den * xp * x - c * (fx1_0 * x + xp * ftx2_0)
-    dsdF[1] = inv_sqrt_den * xp * y - c * (fx1_0 * y + xp * ftx2_1)
-    dsdF[2] = inv_sqrt_den * xp - c * fx1_0
-    dsdF[3] = inv_sqrt_den * yp * x - c * (fx1_1 * x + yp * ftx2_0)
-    dsdF[4] = inv_sqrt_den * yp * y - c * (fx1_1 * y + yp * ftx2_1)
-    dsdF[5] = inv_sqrt_den * yp - c * fx1_1
-    dsdF[6] = inv_sqrt_den * x - c * ftx2_0
-    dsdF[7] = inv_sqrt_den * y - c * ftx2_1
-    dsdF[8] = inv_sqrt_den
-    return s_i, True
+    `num_tangent` and `focal` are compile-time flags, exactly as they are for
+    the accumulate kernels built from them: 7 or 9 for the calibrated problem
+    (fixed or refined shifts), 8 or 9 for the focal one (shared or varying).
+
+    Like `reprojection_point_jacobian` in refiners/absolute.py, each kernel
+    returns `(rx, ry, ok)` and fills `J0`/`J1` in the same call; the caller
+    applies `loss.weight` afterwards and drops the point when it is zero.
+    """
+    refine_shift = (not focal) and num_tangent > 7
+    shared = focal and num_tangent == 8
+
+    @jit(fastmath=True, inline=True)
+    def forward_point(m, x, y, xp, yp, di, J0, J1):
+        # camera 1 -> camera 2: the 3D point the depth induces in camera 1,
+        # projected into image 2
+        zero = real(0.0)
+        if focal:
+            inv_f1 = real(1.0) / m[12]
+            f2 = m[13]
+            X1x = di * x * inv_f1
+            X1y = di * y * inv_f1
+            X1z = di
+        else:
+            z1 = di + m[13]
+            X1x = z1 * x
+            X1y = z1 * y
+            X1z = z1
+        Z1x = m[0] * X1x + m[1] * X1y + m[2] * X1z + m[9]
+        Z1y = m[3] * X1x + m[4] * X1y + m[5] * X1z + m[10]
+        Z1z = m[6] * X1x + m[7] * X1y + m[8] * X1z + m[11]
+        if Z1z <= zero:
+            return zero, zero, False
+        inv_z = real(1.0) / Z1z
+        px = Z1x * inv_z
+        py = Z1y * inv_z
+        if focal:
+            rx = f2 * px - xp
+            ry = f2 * py - yp
+            c = f2 * inv_z
+        else:
+            rx = px - xp
+            ry = py - yp
+            c = inv_z
+
+        # Jproj = c * [[1, 0, -px], [0, 1, -py]]; dz = Jproj @ R (2x3)
+        dz00 = (m[0] - px * m[6]) * c
+        dz01 = (m[1] - px * m[7]) * c
+        dz02 = (m[2] - px * m[8]) * c
+        dz10 = (m[3] - py * m[6]) * c
+        dz11 = (m[4] - py * m[7]) * c
+        dz12 = (m[5] - py * m[8]) * c
+        J0[0] = -X1z * dz01 + X1y * dz02
+        J0[1] = X1z * dz00 - X1x * dz02
+        J0[2] = -X1y * dz00 + X1x * dz01
+        J1[0] = -X1z * dz11 + X1y * dz12
+        J1[1] = X1z * dz10 - X1x * dz12
+        J1[2] = -X1y * dz10 + X1x * dz11
+        J0[3] = c
+        J0[4] = zero
+        J0[5] = -px * c
+        J1[3] = zero
+        J1[4] = c
+        J1[5] = -py * c
+        J0[6] = zero
+        J1[6] = zero
+        if focal:
+            # dX1/df1 = di * (-x/f1^2, -y/f1^2, 0)
+            dxf = -X1x * inv_f1
+            dyf = -X1y * inv_f1
+            df10 = dz00 * dxf + dz01 * dyf
+            df11 = dz10 * dxf + dz11 * dyf
+            if shared:
+                J0[7] = px + df10
+                J1[7] = py + df11
+            else:
+                J0[7] = df10
+                J1[7] = df11
+                J0[8] = px
+                J1[8] = py
+        elif refine_shift:
+            # dX1/dshift1 = x1h
+            J0[7] = dz00 * x + dz01 * y + dz02
+            J1[7] = dz10 * x + dz11 * y + dz12
+            J0[8] = zero
+            J1[8] = zero
+        return rx, ry, True
+
+    @jit(fastmath=True, inline=True)
+    def backward_point(m, x, y, xp, yp, di, J0, J1):
+        # camera 2 -> camera 1: the scaled 3D point the depth induces in
+        # camera 2, mapped back through R^T and projected into image 1
+        zero = real(0.0)
+        if focal:
+            f1 = m[12]
+            inv_f2 = real(1.0) / m[13]
+            s = m[14]
+            w2 = di
+            X2sx = w2 * xp * inv_f2
+            X2sy = w2 * yp * inv_f2
+        else:
+            s = m[12]
+            w2 = di + m[14]
+            X2sx = w2 * xp
+            X2sy = w2 * yp
+        X2sz = w2
+        X2tx = s * X2sx - m[9]
+        X2ty = s * X2sy - m[10]
+        X2tz = s * X2sz - m[11]
+        Z2x = m[0] * X2tx + m[3] * X2ty + m[6] * X2tz
+        Z2y = m[1] * X2tx + m[4] * X2ty + m[7] * X2tz
+        Z2z = m[2] * X2tx + m[5] * X2ty + m[8] * X2tz
+        if Z2z <= zero:
+            return zero, zero, False
+        inv_z = real(1.0) / Z2z
+        px = Z2x * inv_z
+        py = Z2y * inv_z
+        if focal:
+            rx = f1 * px - x
+            ry = f1 * py - y
+            c = f1 * inv_z
+        else:
+            rx = px - x
+            ry = py - y
+            c = inv_z
+
+        # a-rows: Jproj @ R^T
+        a00 = (m[0] - px * m[2]) * c
+        a01 = (m[3] - px * m[5]) * c
+        a02 = (m[6] - px * m[8]) * c
+        a10 = (m[1] - py * m[2]) * c
+        a11 = (m[4] - py * m[5]) * c
+        a12 = (m[7] - py * m[8]) * c
+        # rotation: Jproj @ (Z2 x e_k), with y_vec = R^T X2t = Z2
+        J0[0] = (-px * (-Z2y)) * c
+        J0[1] = (-Z2z - px * Z2x) * c
+        J0[2] = Z2y * c
+        J1[0] = (Z2z - py * (-Z2y)) * c
+        J1[1] = (-py * Z2x) * c
+        J1[2] = -Z2x * c
+        # translation: -Jproj @ R^T
+        J0[3] = -a00
+        J0[4] = -a01
+        J0[5] = -a02
+        J1[3] = -a10
+        J1[4] = -a11
+        J1[5] = -a12
+        # scale: Jproj @ R^T @ X2s
+        J0[6] = a00 * X2sx + a01 * X2sy + a02 * X2sz
+        J1[6] = a10 * X2sx + a11 * X2sy + a12 * X2sz
+        if focal:
+            # dX2/df2 = s * w2 * (-xp/f2^2, -yp/f2^2, 0)
+            dxf = -s * X2sx * inv_f2
+            dyf = -s * X2sy * inv_f2
+            df20 = a00 * dxf + a01 * dyf
+            df21 = a10 * dxf + a11 * dyf
+            if shared:
+                J0[7] = px + df20
+                J1[7] = py + df21
+            else:
+                J0[7] = px
+                J1[7] = py
+                J0[8] = df20
+                J1[8] = df21
+        elif refine_shift:
+            J0[7] = zero
+            J1[7] = zero
+            # dX2/dshift2 = s * x2h
+            J0[8] = s * (a00 * xp + a01 * yp + a02)
+            J1[8] = s * (a10 * xp + a11 * yp + a12)
+        return rx, ry, True
+
+    return {'forward_point': forward_point, 'backward_point': backward_point}
+
+
+_CPU_PRIM = build_monodepth_primitives(cpu_jit)
+_focal_fundamental = _CPU_PRIM['focal_fundamental']
+_essential_tangent_rows = _CPU_PRIM['essential_tangent_rows']
+_focal_tangent_rows = _CPU_PRIM['focal_tangent_rows']
+
+_CPU_REPROJ = {
+    (nt, focal): build_monodepth_reproj_kernels(cpu_jit, num_tangent=nt,
+                                                focal=focal)
+    for nt, focal in ((7, False), (9, False), (8, True), (9, True))
+}
+_CPU_RESID = {focal: build_monodepth_residual_kernels(cpu_jit, focal=focal)
+              for focal in (False, True)}
 
 
 @njit(cache=True, inline='always', fastmath=True)
 def _sampson_sq(x, y, xp, yp, f):
     # squared Sampson residual (untruncated); 1e300 for a degenerate
     # denominator
-    fx1_0 = f[0] * x + f[1] * y + f[2]
-    fx1_1 = f[3] * x + f[4] * y + f[5]
-    fx1_2 = f[6] * x + f[7] * y + f[8]
-    ftx2_0 = f[0] * xp + f[3] * yp + f[6]
-    ftx2_1 = f[1] * xp + f[4] * yp + f[7]
-    residual = xp * fx1_0 + yp * fx1_1 + fx1_2
-    denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
-                   + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
-    if denominator <= 0.0:
+    r2, den = sampson_residual(f, x, y, xp, yp)
+    if den <= 0.0:
         return 1e300
-    return residual * residual / denominator
+    return r2 / den
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +485,8 @@ def build_monodepth_hybrid_cost(loss):
     # shift2]; per-term contributions are robustified by loss.cost, so the
     # LM loop's accept/reject test matches the accumulate kernel's weighting
     cost_fn = loss.cost
+    _forward = _CPU_RESID[False]['forward_residual']
+    _backward = _CPU_RESID[False]['backward_residual']
 
     @njit(cache=True, fastmath=True)
     def _monodepth_hybrid_cost(model, data, max_error_sq, best_score):
@@ -225,9 +496,6 @@ def build_monodepth_hybrid_cost(loss):
         scale_reproj = data[6]
         weight_sampson = data[7]
         n = x1_x.shape[0]
-        s = model[12]
-        u = model[13]
-        v = model[14]
 
         e = np.empty(9)
         essential_from_pose(model, e)
@@ -247,30 +515,14 @@ def build_monodepth_hybrid_cost(loss):
                     num_inliers += 1
 
             if scale_reproj > 0.0:
-                z1 = d1[i] + u
-                Z1x = model[0] * z1 * x + model[1] * z1 * y + model[2] * z1 + model[9]
-                Z1y = model[3] * z1 * x + model[4] * z1 * y + model[5] * z1 + model[10]
-                Z1z = model[6] * z1 * x + model[7] * z1 * y + model[8] * z1 + model[11]
-                if Z1z > 0.0:
-                    inv_z = 1.0 / Z1z
-                    rx = Z1x * inv_z - xp
-                    ry = Z1y * inv_z - yp
-                    r2 = scale_reproj * (rx * rx + ry * ry)
-                    cost += cost_fn(r2, max_error_sq)
-
-                z2 = s * (d2[i] + v)
-                X2x = z2 * xp - model[9]
-                X2y = z2 * yp - model[10]
-                X2z = z2 - model[11]
-                Z2x = model[0] * X2x + model[3] * X2y + model[6] * X2z
-                Z2y = model[1] * X2x + model[4] * X2y + model[7] * X2z
-                Z2z = model[2] * X2x + model[5] * X2y + model[8] * X2z
-                if Z2z > 0.0:
-                    inv_z = 1.0 / Z2z
-                    rx = Z2x * inv_z - x
-                    ry = Z2y * inv_z - y
-                    r2 = scale_reproj * (rx * rx + ry * ry)
-                    cost += cost_fn(r2, max_error_sq)
+                rx, ry, ok = _forward(model, x, y, xp, yp, d1[i])
+                if ok:
+                    cost += cost_fn(scale_reproj * (rx * rx + ry * ry),
+                                    max_error_sq)
+                rx, ry, ok = _backward(model, x, y, xp, yp, d2[i])
+                if ok:
+                    cost += cost_fn(scale_reproj * (rx * rx + ry * ry),
+                                    max_error_sq)
 
         return cost, num_inliers
 
@@ -282,6 +534,8 @@ def build_monodepth_focal_hybrid_cost(loss):
     # centered pixel coordinates; per-term contributions robustified by
     # loss.cost, consistent with the accumulate kernel's weighting
     cost_fn = loss.cost
+    _forward = _CPU_RESID[True]['forward_residual']
+    _backward = _CPU_RESID[True]['backward_residual']
 
     @njit(cache=True, fastmath=True)
     def _monodepth_focal_hybrid_cost(model, data, max_error_sq, best_score):
@@ -293,11 +547,8 @@ def build_monodepth_focal_hybrid_cost(loss):
         n = x1_x.shape[0]
         f1 = model[12]
         f2 = model[13]
-        s = model[14]
         if f1 <= 0.0 or f2 <= 0.0:
             return 1e300, 0
-        inv_f1 = 1.0 / f1
-        inv_f2 = 1.0 / f2
 
         e = np.empty(9)
         fmat = np.empty(9)
@@ -319,33 +570,14 @@ def build_monodepth_focal_hybrid_cost(loss):
                     num_inliers += 1
 
             if scale_reproj > 0.0:
-                # bearing b1 = (x/f1, y/f1, 1); forward projects with f2
-                b1x = x * inv_f1
-                b1y = y * inv_f1
-                z1 = d1[i]
-                Z1x = model[0] * z1 * b1x + model[1] * z1 * b1y + model[2] * z1 + model[9]
-                Z1y = model[3] * z1 * b1x + model[4] * z1 * b1y + model[5] * z1 + model[10]
-                Z1z = model[6] * z1 * b1x + model[7] * z1 * b1y + model[8] * z1 + model[11]
-                if Z1z > 0.0:
-                    inv_z = 1.0 / Z1z
-                    rx = f2 * Z1x * inv_z - xp
-                    ry = f2 * Z1y * inv_z - yp
-                    r2 = scale_reproj * (rx * rx + ry * ry)
-                    cost += cost_fn(r2, max_error_sq)
-
-                z2 = s * d2[i]
-                X2x = z2 * xp * inv_f2 - model[9]
-                X2y = z2 * yp * inv_f2 - model[10]
-                X2z = z2 - model[11]
-                Z2x = model[0] * X2x + model[3] * X2y + model[6] * X2z
-                Z2y = model[1] * X2x + model[4] * X2y + model[7] * X2z
-                Z2z = model[2] * X2x + model[5] * X2y + model[8] * X2z
-                if Z2z > 0.0:
-                    inv_z = 1.0 / Z2z
-                    rx = f1 * Z2x * inv_z - x
-                    ry = f1 * Z2y * inv_z - y
-                    r2 = scale_reproj * (rx * rx + ry * ry)
-                    cost += cost_fn(r2, max_error_sq)
+                rx, ry, ok = _forward(model, x, y, xp, yp, d1[i])
+                if ok:
+                    cost += cost_fn(scale_reproj * (rx * rx + ry * ry),
+                                    max_error_sq)
+                rx, ry, ok = _backward(model, x, y, xp, yp, d2[i])
+                if ok:
+                    cost += cost_fn(scale_reproj * (rx * rx + ry * ry),
+                                    max_error_sq)
 
         return cost, num_inliers
 
@@ -362,8 +594,9 @@ monodepth_focal_hybrid_cost = build_monodepth_focal_hybrid_cost(TruncatedLoss())
 
 def _make_accumulate_calibrated(num_tangent, loss):
     # num_tangent 7 (fixed shifts) or 9 (refined shifts)
-    refine_shift = num_tangent > 7
     weight_fn = loss.weight
+    _forward = _CPU_REPROJ[(num_tangent, False)]['forward_point']
+    _backward = _CPU_REPROJ[(num_tangent, False)]['backward_point']
 
     @njit(cache=True, fastmath=True)
     def _accumulate(data, f, state, JtJ, Jtr, max_error_sq):
@@ -373,9 +606,8 @@ def _make_accumulate_calibrated(num_tangent, loss):
         scale_reproj = data[6]
         weight_sampson = data[7]
         n = x1_x.shape[0]
-        s = f[12]
-        u = f[13]
-        v = f[14]
+        # the scale and the two shifts are read off `f` inside the point
+        # kernels, which is why they are not unpacked here
 
         for p in range(num_tangent):
             Jtr[p] = 0.0
@@ -400,51 +632,12 @@ def _make_accumulate_calibrated(num_tangent, loss):
 
             if scale_reproj > 0.0:
                 # forward reprojection (cam1 -> cam2)
-                z1 = d1[i] + u
-                X1x = z1 * x
-                X1y = z1 * y
-                X1z = z1
-                Z1x = f[0] * X1x + f[1] * X1y + f[2] * X1z + f[9]
-                Z1y = f[3] * X1x + f[4] * X1y + f[5] * X1z + f[10]
-                Z1z = f[6] * X1x + f[7] * X1y + f[8] * X1z + f[11]
-                if Z1z > 0.0:
-                    inv_z = 1.0 / Z1z
-                    px = Z1x * inv_z
-                    py = Z1y * inv_z
-                    rx = px - xp
-                    ry = py - yp
+                rx, ry, ok = _forward(f, x, y, xp, yp, d1[i], J0, J1)
+                if ok:
                     r2 = scale_reproj * (rx * rx + ry * ry)
                     w = weight_fn(r2, max_error_sq)
                     if w > 0.0:
                         num_residuals += 2
-                        # Jproj = [[1, 0, -px], [0, 1, -py]] * inv_z;
-                        # dZ = Jproj @ R (2x3)
-                        dz00 = (f[0] - px * f[6]) * inv_z
-                        dz01 = (f[1] - px * f[7]) * inv_z
-                        dz02 = (f[2] - px * f[8]) * inv_z
-                        dz10 = (f[3] - py * f[6]) * inv_z
-                        dz11 = (f[4] - py * f[7]) * inv_z
-                        dz12 = (f[5] - py * f[8]) * inv_z
-                        J0[0] = -X1z * dz01 + X1y * dz02
-                        J0[1] = X1z * dz00 - X1x * dz02
-                        J0[2] = -X1y * dz00 + X1x * dz01
-                        J1[0] = -X1z * dz11 + X1y * dz12
-                        J1[1] = X1z * dz10 - X1x * dz12
-                        J1[2] = -X1y * dz10 + X1x * dz11
-                        J0[3] = inv_z
-                        J0[4] = 0.0
-                        J0[5] = -px * inv_z
-                        J1[3] = 0.0
-                        J1[4] = inv_z
-                        J1[5] = -py * inv_z
-                        J0[6] = 0.0
-                        J1[6] = 0.0
-                        if refine_shift:
-                            # dX1/dshift1 = x1h
-                            J0[7] = dz00 * x + dz01 * y + dz02
-                            J1[7] = dz10 * x + dz11 * y + dz12
-                            J0[8] = 0.0
-                            J1[8] = 0.0
                         wsr = w * scale_reproj
                         for p in range(num_tangent):
                             Jtr[p] += wsr * (J0[p] * rx + J1[p] * ry)
@@ -453,60 +646,12 @@ def _make_accumulate_calibrated(num_tangent, loss):
                                                     + J1[p] * J1[q])
 
                 # backward reprojection (cam2 -> cam1)
-                w2 = d2[i] + v
-                X2sx = w2 * xp
-                X2sy = w2 * yp
-                X2sz = w2
-                X2tx = s * X2sx - f[9]
-                X2ty = s * X2sy - f[10]
-                X2tz = s * X2sz - f[11]
-                Z2x = f[0] * X2tx + f[3] * X2ty + f[6] * X2tz
-                Z2y = f[1] * X2tx + f[4] * X2ty + f[7] * X2tz
-                Z2z = f[2] * X2tx + f[5] * X2ty + f[8] * X2tz
-                if Z2z > 0.0:
-                    inv_z = 1.0 / Z2z
-                    px = Z2x * inv_z
-                    py = Z2y * inv_z
-                    rx = px - x
-                    ry = py - y
+                rx, ry, ok = _backward(f, x, y, xp, yp, d2[i], J0, J1)
+                if ok:
                     r2 = scale_reproj * (rx * rx + ry * ry)
                     w = weight_fn(r2, max_error_sq)
                     if w > 0.0:
                         num_residuals += 2
-                        # y_vec = R^T X2t = Z2; dZ2/dw_k = Z2 x e_k
-                        # Jproj rows through R^T for translation and scale
-                        # a-rows: Jproj @ R^T
-                        a00 = (f[0] - px * f[2]) * inv_z
-                        a01 = (f[3] - px * f[5]) * inv_z
-                        a02 = (f[6] - px * f[8]) * inv_z
-                        a10 = (f[1] - py * f[2]) * inv_z
-                        a11 = (f[4] - py * f[5]) * inv_z
-                        a12 = (f[7] - py * f[8]) * inv_z
-                        # rotation: Jproj @ (Z2 x e_k)
-                        # (Z2 x e_0) = (0, Z2z, -Z2y) etc.; Jproj = [[1,0,-px],
-                        # [0,1,-py]] * inv_z applied to camera-frame vectors
-                        J0[0] = (-px * (-Z2y)) * inv_z
-                        J0[1] = (-Z2z - px * Z2x) * inv_z
-                        J0[2] = Z2y * inv_z
-                        J1[0] = (Z2z - py * (-Z2y)) * inv_z
-                        J1[1] = (-py * Z2x) * inv_z
-                        J1[2] = -Z2x * inv_z
-                        # translation: -Jproj @ R^T
-                        J0[3] = -a00
-                        J0[4] = -a01
-                        J0[5] = -a02
-                        J1[3] = -a10
-                        J1[4] = -a11
-                        J1[5] = -a12
-                        # scale: Jproj @ R^T @ X2s
-                        J0[6] = a00 * X2sx + a01 * X2sy + a02 * X2sz
-                        J1[6] = a10 * X2sx + a11 * X2sy + a12 * X2sz
-                        if refine_shift:
-                            J0[7] = 0.0
-                            J1[7] = 0.0
-                            # dX2/dshift2 = s * x2h
-                            J0[8] = s * (a00 * xp + a01 * yp + a02)
-                            J1[8] = s * (a10 * xp + a11 * yp + a12)
                         wsr = w * scale_reproj
                         for p in range(num_tangent):
                             Jtr[p] += wsr * (J0[p] * rx + J1[p] * ry)
@@ -515,7 +660,7 @@ def _make_accumulate_calibrated(num_tangent, loss):
                                                     + J1[p] * J1[q])
 
             if weight_sampson > 0.0:
-                s_i, valid = _sampson_dsdF(x, y, xp, yp, e, dsdF)
+                s_i, valid = sampson_point_jacobian(e, x, y, xp, yp, dsdF)
                 if valid:
                     w = weight_fn(s_i * s_i, max_error_sq)
                     if w > 0.0:
@@ -546,6 +691,8 @@ def _make_accumulate_focal(shared, loss):
     # [w, dt, dscale, df1, df2] (9)
     num_tangent = 8 if shared else 9
     weight_fn = loss.weight
+    _forward = _CPU_REPROJ[(num_tangent, True)]['forward_point']
+    _backward = _CPU_REPROJ[(num_tangent, True)]['backward_point']
 
     @njit(cache=True, fastmath=True)
     def _accumulate(data, f, state, JtJ, Jtr, max_error_sq):
@@ -557,11 +704,10 @@ def _make_accumulate_focal(shared, loss):
         n = x1_x.shape[0]
         f1 = f[12]
         f2 = f[13]
-        s = f[14]
         if f1 <= 0.0 or f2 <= 0.0:
             return 0
-        inv_f1 = 1.0 / f1
-        inv_f2 = 1.0 / f2
+        # the scale and the two reciprocals are read off `f` inside the point
+        # kernels, which is why they are not unpacked here
 
         for p in range(num_tangent):
             Jtr[p] = 0.0
@@ -577,26 +723,7 @@ def _make_accumulate_focal(shared, loss):
         # diag(1,1,f2) . diag(1,1,f1) pattern; then the focal rows
         B = np.empty((num_tangent, 9))
         _essential_tangent_rows(e, f, B, num_tangent)
-        for p in range(6):
-            B[p, 2] *= f1
-            B[p, 5] *= f1
-            B[p, 6] *= f2
-            B[p, 7] *= f2
-            B[p, 8] *= f1 * f2
-        if shared:
-            # dF/df with f1 = f2 = f
-            B[7, 2] = e[2]
-            B[7, 5] = e[5]
-            B[7, 6] = e[6]
-            B[7, 7] = e[7]
-            B[7, 8] = 2.0 * f1 * e[8]
-        else:
-            B[7, 2] = e[2]
-            B[7, 5] = e[5]
-            B[7, 8] = f2 * e[8]
-            B[8, 6] = e[6]
-            B[8, 7] = e[7]
-            B[8, 8] = f1 * e[8]
+        _focal_tangent_rows(e, f1, f2, B, shared)
 
         dsdF = np.empty(9)
         J = np.empty(num_tangent)
@@ -612,60 +739,12 @@ def _make_accumulate_focal(shared, loss):
 
             if scale_reproj > 0.0:
                 # forward reprojection (cam1 -> cam2, projected with f2)
-                b1x = x * inv_f1
-                b1y = y * inv_f1
-                z1 = d1[i]
-                X1x = z1 * b1x
-                X1y = z1 * b1y
-                X1z = z1
-                Z1x = f[0] * X1x + f[1] * X1y + f[2] * X1z + f[9]
-                Z1y = f[3] * X1x + f[4] * X1y + f[5] * X1z + f[10]
-                Z1z = f[6] * X1x + f[7] * X1y + f[8] * X1z + f[11]
-                if Z1z > 0.0:
-                    inv_z = 1.0 / Z1z
-                    px = Z1x * inv_z
-                    py = Z1y * inv_z
-                    rx = f2 * px - xp
-                    ry = f2 * py - yp
+                rx, ry, ok = _forward(f, x, y, xp, yp, d1[i], J0, J1)
+                if ok:
                     r2 = scale_reproj * (rx * rx + ry * ry)
                     w = weight_fn(r2, max_error_sq)
                     if w > 0.0:
                         num_residuals += 2
-                        # Jproj = f2 * [[1, 0, -px], [0, 1, -py]] * inv_z
-                        c = f2 * inv_z
-                        dz00 = (f[0] - px * f[6]) * c
-                        dz01 = (f[1] - px * f[7]) * c
-                        dz02 = (f[2] - px * f[8]) * c
-                        dz10 = (f[3] - py * f[6]) * c
-                        dz11 = (f[4] - py * f[7]) * c
-                        dz12 = (f[5] - py * f[8]) * c
-                        J0[0] = -X1z * dz01 + X1y * dz02
-                        J0[1] = X1z * dz00 - X1x * dz02
-                        J0[2] = -X1y * dz00 + X1x * dz01
-                        J1[0] = -X1z * dz11 + X1y * dz12
-                        J1[1] = X1z * dz10 - X1x * dz12
-                        J1[2] = -X1y * dz10 + X1x * dz11
-                        J0[3] = c
-                        J0[4] = 0.0
-                        J0[5] = -px * c
-                        J1[3] = 0.0
-                        J1[4] = c
-                        J1[5] = -py * c
-                        J0[6] = 0.0
-                        J1[6] = 0.0
-                        # dX1/df1 = z1 * (-x/f1^2, -y/f1^2, 0)
-                        dxf = -z1 * b1x * inv_f1
-                        dyf = -z1 * b1y * inv_f1
-                        df10 = dz00 * dxf + dz01 * dyf
-                        df11 = dz10 * dxf + dz11 * dyf
-                        if shared:
-                            J0[7] = px + df10
-                            J1[7] = py + df11
-                        else:
-                            J0[7] = df10
-                            J1[7] = df11
-                            J0[8] = px
-                            J1[8] = py
                         wsr = w * scale_reproj
                         for p in range(num_tangent):
                             Jtr[p] += wsr * (J0[p] * rx + J1[p] * ry)
@@ -674,63 +753,12 @@ def _make_accumulate_focal(shared, loss):
                                                     + J1[p] * J1[q])
 
                 # backward reprojection (cam2 -> cam1, projected with f1)
-                b2x = xp * inv_f2
-                b2y = yp * inv_f2
-                w2 = d2[i]
-                X2sx = w2 * b2x
-                X2sy = w2 * b2y
-                X2sz = w2
-                X2tx = s * X2sx - f[9]
-                X2ty = s * X2sy - f[10]
-                X2tz = s * X2sz - f[11]
-                Z2x = f[0] * X2tx + f[3] * X2ty + f[6] * X2tz
-                Z2y = f[1] * X2tx + f[4] * X2ty + f[7] * X2tz
-                Z2z = f[2] * X2tx + f[5] * X2ty + f[8] * X2tz
-                if Z2z > 0.0:
-                    inv_z = 1.0 / Z2z
-                    px = Z2x * inv_z
-                    py = Z2y * inv_z
-                    rx = f1 * px - x
-                    ry = f1 * py - y
+                rx, ry, ok = _backward(f, x, y, xp, yp, d2[i], J0, J1)
+                if ok:
                     r2 = scale_reproj * (rx * rx + ry * ry)
                     w = weight_fn(r2, max_error_sq)
                     if w > 0.0:
                         num_residuals += 2
-                        c = f1 * inv_z
-                        a00 = (f[0] - px * f[2]) * c
-                        a01 = (f[3] - px * f[5]) * c
-                        a02 = (f[6] - px * f[8]) * c
-                        a10 = (f[1] - py * f[2]) * c
-                        a11 = (f[4] - py * f[5]) * c
-                        a12 = (f[7] - py * f[8]) * c
-                        # rotation: Jproj @ (Z2 x e_k), Jproj scaled by f1
-                        J0[0] = (-px * (-Z2y)) * c
-                        J0[1] = (-Z2z - px * Z2x) * c
-                        J0[2] = Z2y * c
-                        J1[0] = (Z2z - py * (-Z2y)) * c
-                        J1[1] = (-py * Z2x) * c
-                        J1[2] = -Z2x * c
-                        J0[3] = -a00
-                        J0[4] = -a01
-                        J0[5] = -a02
-                        J1[3] = -a10
-                        J1[4] = -a11
-                        J1[5] = -a12
-                        J0[6] = a00 * X2sx + a01 * X2sy + a02 * X2sz
-                        J1[6] = a10 * X2sx + a11 * X2sy + a12 * X2sz
-                        # dX2/df2 = s * w2 * (-xp/f2^2, -yp/f2^2, 0)
-                        dxf = -s * w2 * b2x * inv_f2
-                        dyf = -s * w2 * b2y * inv_f2
-                        df20 = a00 * dxf + a01 * dyf
-                        df21 = a10 * dxf + a11 * dyf
-                        if shared:
-                            J0[7] = px + df20
-                            J1[7] = py + df21
-                        else:
-                            J0[7] = px
-                            J1[7] = py
-                            J0[8] = df20
-                            J1[8] = df21
                         wsr = w * scale_reproj
                         for p in range(num_tangent):
                             Jtr[p] += wsr * (J0[p] * rx + J1[p] * ry)
@@ -739,7 +767,7 @@ def _make_accumulate_focal(shared, loss):
                                                     + J1[p] * J1[q])
 
             if weight_sampson > 0.0:
-                s_i, valid = _sampson_dsdF(x, y, xp, yp, fmat, dsdF)
+                s_i, valid = sampson_point_jacobian(fmat, x, y, xp, yp, dsdF)
                 if valid:
                     w = weight_fn(s_i * s_i, max_error_sq)
                     if w > 0.0:

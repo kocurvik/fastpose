@@ -9,7 +9,8 @@ benchmark).
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
+from fastpose.estimators.utils import (build_info, check_device, check_min_points,
+                                       failure_info, get_cuda_estimator,
                                        point_columns, unproject_pair)
 from fastpose.refiners.essential import LMEssentialRefiner
 from fastpose.refiners.losses import CauchyLoss
@@ -45,7 +46,8 @@ def estimate_relative_pose(x1, x2, camera1=None, camera2=None, iterations=1000,
                            max_error=0.002, seed=4578, min_iterations=None,
                            success_prob=0.9999, lo_iterations=25,
                            final_refinement_iterations=100,
-                           num_threads=None, batch_per_thread=None):
+                           num_threads=None, batch_per_thread=None,
+                           device='cpu', batch=None):
     # params:
     # x1, x2 - (n, 2) arrays of corresponding *calibrated* (normalized) image
     #          points; for pixel points apply (x - c) / f first, or pass
@@ -69,6 +71,20 @@ def estimate_relative_pose(x1, x2, camera1=None, camera2=None, iterations=1000,
     #     leave it off when already running one process per core.
     # batch_per_thread - hypotheses per thread in a batch; None (default)
     #     uses ransac.DEFAULT_BATCH_PER_THREAD
+    # device - 'cpu' (default) runs the numba CPU drivers above. 'cuda' runs
+    #     the batch-parallel GPU driver (fastpose/cuda/ransac.py): solving,
+    #     scoring, local optimization and the final polish all run on device,
+    #     with `batch` hypotheses in flight per round. It wins on many
+    #     iterations and many matches and loses on small problems, where a
+    #     round of kernel launches costs more than the whole CPU estimate.
+    #     Its result is a batched LO-RANSAC rather than the serial one - see
+    #     the module docstring for what differs. Ignores num_threads.
+    # batch - hypotheses per GPU round; None uses cuda.ransac.DEFAULT_BATCH.
+    #     This is the round *cap*: with adaptive termination on
+    #     (min_iterations < iterations) rounds ramp up to it from
+    #     cuda.ransac.FIRST_ROUND, so an early stop overshoots by little;
+    #     otherwise every round runs at the cap. Round size tracks the
+    #     iteration budget, not the match count - see the README
     # returns (model, info) with model = {'R', 't'} (unit norm t,
     # x2 ~ R x1 + t) and info = {'inliers', 'num_inliers', 'model_score',
     # 'iterations', 'refinements'}; on total failure model holds the
@@ -76,15 +92,24 @@ def estimate_relative_pose(x1, x2, camera1=None, camera2=None, iterations=1000,
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
     check_min_points(len(x1), FivePointSolver.sample_size)
+    check_device(device)
     x1, x2, max_error = unproject_pair(camera1, camera2, x1, x2, max_error)
     data = point_columns(x1, x2)
 
-    estimator = _get_default_estimator()
-    model, _, num_inliers, ransac_iterations = estimator.estimate(
-        data, len(x1), max_error, iterations=iterations,
-        min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed,
-        num_threads=num_threads, batch_per_thread=batch_per_thread)
+    cuda_estimator = None
+    if device == 'cuda':
+        cuda_estimator = get_cuda_estimator('essential', batch)
+        model, _, num_inliers, ransac_iterations = cuda_estimator.estimate(
+            data, len(x1), max_error, iterations=iterations,
+            min_iterations=min_iterations, success_prob=success_prob,
+            lo_iterations=lo_iterations, seed=seed)
+    else:
+        estimator = _get_default_estimator()
+        model, _, num_inliers, ransac_iterations = estimator.estimate(
+            data, len(x1), max_error, iterations=iterations,
+            min_iterations=min_iterations, success_prob=success_prob,
+            lo_iterations=lo_iterations, seed=seed,
+            num_threads=num_threads, batch_per_thread=batch_per_thread)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3)},
@@ -101,13 +126,23 @@ def estimate_relative_pose(x1, x2, camera1=None, camera2=None, iterations=1000,
     if (final_refinement_iterations != 0
             and num_inliers > FivePointSolver.sample_size):
         final_refiner = _get_final_refiner()
-        inlier_data = point_columns(x1[inliers], x2[inliers])
-        refined_model = np.empty(12)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
-                                num_final_iterations):
+        if cuda_estimator is not None:
+            # on device, through the same LM kernel built for the Cauchy
+            # loss; at large n this pass is O(n) per step and would otherwise
+            # dominate what the GPU driver just saved
+            refined_model = cuda_estimator.final_refine(
+                model, max_error ** 2, num_final_iterations,
+                final_refiner.loss)
+            ok = refined_model is not None
+        else:
+            inlier_data = point_columns(x1[inliers], x2[inliers])
+            refined_model = np.empty(12)
+            ok = final_refiner.refine(inlier_data, model, refined_model,
+                                      max_error ** 2, num_final_iterations)
+        if ok:
             R_c = refined_model[:9].reshape(3, 3).copy()
             t_c = refined_model[9:12].copy()
             score_c, inliers_c, num_inliers_c = PoseSampsonScorer.score_numpy(

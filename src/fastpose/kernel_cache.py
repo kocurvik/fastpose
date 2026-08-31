@@ -43,6 +43,16 @@ _PREFIX = 'fastpose:'
 # cell types whose repr is a faithful, stable identity
 _LITERALS = (bool, int, float, complex, str, bytes, type(None))
 
+# numba type objects appear as closure cells wherever a kernel is specialized
+# on a precision (the mixed-precision GPU kernels close over float32 where the
+# CPU ones close over float64). Their `str` is the type name, which is exactly
+# the stable identity we want - without this branch they would raise _Unstable
+# and silently disable caching for every kernel that reaches them.
+try:
+    from numba.core.types import Type as _NumbaType
+except Exception:  # pragma: no cover - numba internals moved
+    _NumbaType = ()
+
 
 class _Unstable(Exception):
     # a closure cell we cannot identify deterministically
@@ -66,6 +76,8 @@ def _tag(value, seen):
         return _pin(value, seen)
     if isinstance(value, _LITERALS):
         return repr(value)
+    if _NumbaType and isinstance(value, _NumbaType):
+        return str(value)
     raise _Unstable(type(value).__name__)
 
 

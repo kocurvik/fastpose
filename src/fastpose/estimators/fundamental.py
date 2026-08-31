@@ -7,7 +7,8 @@ for benchmarking.
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
+from fastpose.estimators.utils import (build_info, check_device, check_min_points,
+                                       failure_info, get_cuda_estimator,
                                        normalize_points, point_columns)
 from fastpose.refiners.fundamental import LMFundamentalRefiner
 from fastpose.refiners.losses import CauchyLoss
@@ -65,7 +66,8 @@ def _get_final_refiner():
 def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
                          min_iterations=None, success_prob=0.9999,
                          lo_iterations=25, final_refinement_iterations=100,
-                         num_threads=None, batch_per_thread=None):
+                         num_threads=None, batch_per_thread=None,
+                         device='cpu', batch=None):
     # params:
     # x1, x2 - (n, 2) arrays of corresponding points
     # iterations - maximum number of RANSAC iterations
@@ -86,6 +88,11 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
     #     leave it off when already running one process per core.
     # batch_per_thread - hypotheses per thread in a batch; None (default)
     #     uses ransac.DEFAULT_BATCH_PER_THREAD
+    # device - 'cpu' (default) runs the numba CPU drivers above; 'cuda' runs
+    #     the batch-parallel GPU driver (fastpose/cuda/ransac.py), which
+    #     solves, scores, locally optimizes and polishes on device, in the
+    #     same normalized frame. Ignores num_threads.
+    # batch - hypotheses per GPU round; None uses cuda.ransac.DEFAULT_BATCH
     # returns (model, info) with model = {'F'} and info = {'inliers',
     # 'num_inliers', 'model_score', 'iterations', 'refinements'}; on total
     # failure model holds an all-zero placeholder F and
@@ -93,15 +100,24 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
     check_min_points(len(x1), SevenPointSolver.sample_size)
+    check_device(device)
     x1n, x2n, T, scale = normalize_points(x1, x2)
     data = point_columns(x1n, x2n)
 
-    estimator = _get_default_estimator()
-    model, _, num_inliers, ransac_iterations = estimator.estimate(
-        data, len(x1), max_error * scale, iterations=iterations,
-        min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed,
-        num_threads=num_threads, batch_per_thread=batch_per_thread)
+    cuda_estimator = None
+    if device == 'cuda':
+        cuda_estimator = get_cuda_estimator('fundamental', batch)
+        model, _, num_inliers, ransac_iterations = cuda_estimator.estimate(
+            data, len(x1), max_error * scale, iterations=iterations,
+            min_iterations=min_iterations, success_prob=success_prob,
+            lo_iterations=lo_iterations, seed=seed)
+    else:
+        estimator = _get_default_estimator()
+        model, _, num_inliers, ransac_iterations = estimator.estimate(
+            data, len(x1), max_error * scale, iterations=iterations,
+            min_iterations=min_iterations, success_prob=success_prob,
+            lo_iterations=lo_iterations, seed=seed,
+            num_threads=num_threads, batch_per_thread=batch_per_thread)
 
     if num_inliers == 0:
         return {'F': np.zeros((3, 3))}, failure_info(len(x1), ransac_iterations)
@@ -117,14 +133,22 @@ def estimate_fundamental(x1, x2, iterations=1000, max_error=2.0, seed=4578,
     if (final_refinement_iterations != 0
             and num_inliers > SevenPointSolver.sample_size):
         final_refiner = _get_final_refiner()
-        inlier_data = point_columns(x1n[inliers], x2n[inliers])
-        refined_model = np.empty(9)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined_model,
-                                (max_error * scale) ** 2,
-                                num_final_iterations):
+        if cuda_estimator is not None:
+            # on device, through the same LM kernel built for the Cauchy loss
+            refined_model = cuda_estimator.final_refine(
+                model, (max_error * scale) ** 2, num_final_iterations,
+                final_refiner.loss)
+            ok = refined_model is not None
+        else:
+            inlier_data = point_columns(x1n[inliers], x2n[inliers])
+            refined_model = np.empty(9)
+            ok = final_refiner.refine(inlier_data, model, refined_model,
+                                      (max_error * scale) ** 2,
+                                      num_final_iterations)
+        if ok:
             F_c = T.T @ refined_model.reshape(3, 3) @ T
             score_c, inliers_c, num_inliers_c = SampsonScorer.score_numpy(
                 F_c, x1, x2, max_error)

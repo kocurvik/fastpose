@@ -11,6 +11,8 @@ import math
 import numpy as np
 from numba import njit
 
+from fastpose.jit_backend import cpu_jit
+from fastpose.refiners.absolute import build_reprojection_primitives
 from fastpose.refiners.lm import build_lm_refine
 from fastpose.refiners.losses import TruncatedLoss
 from fastpose.refiners.utils import mat3_mul, rodrigues
@@ -19,6 +21,10 @@ from fastpose.scorers.reprojection import build_focal_reprojection_cost, focal_r
 STATE_SIZE = 13
 MODEL_SIZE = 13
 NUM_TANGENT = 7  # 3 rotation + 3 translation + log-focal
+
+# same jacobian source as the calibrated refiner, built with the focal column
+_CPU_PRIM = build_reprojection_primitives(cpu_jit, focal=True)
+focal_reprojection_point_jacobian = _CPU_PRIM['reprojection_point_jacobian']
 
 
 @njit(cache=True)
@@ -61,8 +67,7 @@ def build_accumulate(loss):
     def _accumulate(data, f, state, JtJ, Jtr, max_error_sq):
         x_x, x_y, X_x, X_y, X_z = data
         n = x_x.shape[0]
-        fl = f[12]
-        if fl <= 0.0:
+        if f[12] <= 0.0:
             return 0
 
         for p in range(NUM_TANGENT):
@@ -72,50 +77,17 @@ def build_accumulate(loss):
 
         J0 = np.empty(NUM_TANGENT)
         J1 = np.empty(NUM_TANGENT)
-        A = np.empty((2, 3))
 
         num_residuals = 0
         for i in range(n):
-            Xx = X_x[i]
-            Xy = X_y[i]
-            Xz = X_z[i]
-            zx = f[0] * Xx + f[1] * Xy + f[2] * Xz + f[9]
-            zy = f[3] * Xx + f[4] * Xy + f[5] * Xz + f[10]
-            zz = f[6] * Xx + f[7] * Xy + f[8] * Xz + f[11]
-            if zz <= 0.0:
+            rx, ry, ok = focal_reprojection_point_jacobian(
+                f, X_x[i], X_y[i], X_z[i], x_x[i], x_y[i], J0, J1)
+            if not ok:
                 continue
-            inv = 1.0 / zz
-            px = zx * inv
-            py = zy * inv
-            rx = fl * px - x_x[i]
-            ry = fl * py - x_y[i]
             w = weight_fn(rx * rx + ry * ry, max_error_sq)
             if w <= 0.0:
                 continue
             num_residuals += 2
-
-            # A = dr/dZ @ R with dr/dZ = fl * [[1, 0, -px], [0, 1, -py]] / zz
-            finv = fl * inv
-            for j in range(3):
-                A[0, j] = finv * (f[j] - px * f[6 + j])
-                A[1, j] = finv * (f[3 + j] - py * f[6 + j])
-
-            # rotation columns dZ/dw_k = R (e_k x X); translation dZ/dt = I;
-            # focal column dr/dlog(fl) = fl * pi(Z)
-            J0[0] = -A[0, 1] * Xz + A[0, 2] * Xy
-            J0[1] = A[0, 0] * Xz - A[0, 2] * Xx
-            J0[2] = -A[0, 0] * Xy + A[0, 1] * Xx
-            J1[0] = -A[1, 1] * Xz + A[1, 2] * Xy
-            J1[1] = A[1, 0] * Xz - A[1, 2] * Xx
-            J1[2] = -A[1, 0] * Xy + A[1, 1] * Xx
-            J0[3] = finv
-            J0[4] = 0.0
-            J0[5] = -px * finv
-            J1[3] = 0.0
-            J1[4] = finv
-            J1[5] = -py * finv
-            J0[6] = fl * px
-            J1[6] = fl * py
 
             for p in range(NUM_TANGENT):
                 Jtr[p] += w * (J0[p] * rx + J1[p] * ry)

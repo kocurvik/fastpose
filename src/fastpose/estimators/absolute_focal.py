@@ -5,7 +5,8 @@ direct pose + log-focal LM refiner."""
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import build_info, check_min_points, failure_info
+from fastpose.estimators.utils import (build_info, check_device, check_min_points,
+                                       failure_info, get_cuda_estimator)
 from fastpose.refiners.absolute_focal import LMAbsolutePoseFocalRefiner
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.scorers.reprojection import FocalReprojectionScorer
@@ -39,7 +40,8 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
                                       success_prob=0.9999, lo_iterations=25,
                                       final_refinement_iterations=100,
                                       num_threads=None,
-                                      batch_per_thread=None):
+                                      batch_per_thread=None,
+                                      device='cpu', batch=None):
     # params:
     # x - (n, 2) array of image points in pixel coordinates (square pixels,
     #     unknown focal length)
@@ -58,6 +60,11 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
     #     leave it off when already running one process per core.
     # batch_per_thread - hypotheses per thread in a batch; None (default)
     #     uses ransac.DEFAULT_BATCH_PER_THREAD
+    # device - 'cpu' (default) runs the numba CPU drivers above; 'cuda' runs
+    #     the batch-parallel GPU driver (fastpose/cuda/ransac.py), which
+    #     solves, scores, locally optimizes and polishes on device. Ignores
+    #     num_threads. See the cuda/ransac.py docstring for what differs.
+    # batch - hypotheses per GPU round; None uses cuda.ransac.DEFAULT_BATCH
     # returns (model, info) with model = {'R', 't', 'f'}
     # (lambda * (x, y, 1) = diag(f, f, 1) (R X + t)) and info = {'inliers',
     # 'num_inliers', 'model_score', 'iterations', 'refinements'}; on total
@@ -66,6 +73,7 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
     x = np.ascontiguousarray(x, dtype=np.float64)
     X = np.ascontiguousarray(X, dtype=np.float64)
     check_min_points(len(x), P4PFSolver.sample_size)
+    check_device(device)
     if principal_point is not None:
         pp = np.asarray(principal_point, dtype=np.float64)
         if pp.shape != (2,):
@@ -75,12 +83,20 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
             np.ascontiguousarray(X[:, 0]), np.ascontiguousarray(X[:, 1]),
             np.ascontiguousarray(X[:, 2]))
 
-    estimator = _get_default_estimator()
-    model, _, num_inliers, ransac_iterations = estimator.estimate(
-        data, len(x), max_error, iterations=iterations,
-        min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed,
-        num_threads=num_threads, batch_per_thread=batch_per_thread)
+    cuda_estimator = None
+    if device == 'cuda':
+        cuda_estimator = get_cuda_estimator('absolute-focal', batch)
+        model, _, num_inliers, ransac_iterations = cuda_estimator.estimate(
+            data, len(x), max_error, iterations=iterations,
+            min_iterations=min_iterations, success_prob=success_prob,
+            lo_iterations=lo_iterations, seed=seed)
+    else:
+        estimator = _get_default_estimator()
+        model, _, num_inliers, ransac_iterations = estimator.estimate(
+            data, len(x), max_error, iterations=iterations,
+            min_iterations=min_iterations, success_prob=success_prob,
+            lo_iterations=lo_iterations, seed=seed,
+            num_threads=num_threads, batch_per_thread=batch_per_thread)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3), 'f': 1.0},
@@ -98,17 +114,25 @@ def estimate_absolute_pose_with_focal(x, X, principal_point=None,
     # so the pass is skipped there (poselib gates its bundle the same way)
     if final_refinement_iterations != 0 and num_inliers > P4PFSolver.sample_size:
         final_refiner = _get_final_refiner()
-        inlier_data = (np.ascontiguousarray(x[inliers, 0]),
-                       np.ascontiguousarray(x[inliers, 1]),
-                       np.ascontiguousarray(X[inliers, 0]),
-                       np.ascontiguousarray(X[inliers, 1]),
-                       np.ascontiguousarray(X[inliers, 2]))
-        refined_model = np.empty(13)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
-                                num_final_iterations):
+        if cuda_estimator is not None:
+            # on device, through the same LM kernel built for the Cauchy loss
+            refined_model = cuda_estimator.final_refine(
+                model, max_error ** 2, num_final_iterations,
+                final_refiner.loss)
+            ok = refined_model is not None
+        else:
+            inlier_data = (np.ascontiguousarray(x[inliers, 0]),
+                           np.ascontiguousarray(x[inliers, 1]),
+                           np.ascontiguousarray(X[inliers, 0]),
+                           np.ascontiguousarray(X[inliers, 1]),
+                           np.ascontiguousarray(X[inliers, 2]))
+            refined_model = np.empty(13)
+            ok = final_refiner.refine(inlier_data, model, refined_model,
+                                      max_error ** 2, num_final_iterations)
+        if ok:
             R_c = refined_model[:9].reshape(3, 3).copy()
             t_c = refined_model[9:12].copy()
             f_c = float(refined_model[12])

@@ -6,7 +6,8 @@ Fundamental/essential
 matrix, calibrated and uncalibrated relative pose (including shared- and
 varying-focal variants), absolute pose (P3P/P4Pf), and monocular-depth-assisted
 relative pose — all built on one [numba](https://numba.pydata.org/)-compiled
-LO-RANSAC engine and benchmarked against PoseLib (C++).
+LO-RANSAC engine and benchmarked against PoseLib (C++). Every problem also has
+a [CUDA backend](#gpu-cuda) that runs the whole estimate batched on the GPU.
 
 See [TESTS.md](TESTS.md) for the tests and for the synthetic benchmarks that
 compare against PoseLib. Real-data numbers are coming later.
@@ -117,6 +118,10 @@ budget for a final robust-loss polish pass over the RANSAC inliers (defaults
 to 100 iterations; 0 disables it), independent of `lo_iterations`. 
 The uncalibrated solvers assume principals at origina if they are not provided as optional params.
 
+Every function also takes `num_threads`/`batch_per_thread` for the parallel
+CPU driver ([Threading](#threading)) and `device`/`batch` for the GPU one
+([GPU (CUDA)](#gpu-cuda)).
+
 ### Threading
 
 Every `estimate_*` function also takes `num_threads` and `batch_per_thread`.
@@ -146,6 +151,82 @@ models the serial driver would bail out of early can get scored in full. A run
 how many threads actually run, and adaptive termination overshoots by at most
 one batch.
 
+### GPU (CUDA)
+
+**Every** `estimate_*` function takes `device='cuda'`, which runs a
+batch-parallel LO-RANSAC on the GPU. Solving, scoring, local optimization and
+the final polish pass all run on device.
+
+```python
+model, info = estimate_relative_pose(x1, x2, camera1=K1, camera2=K2,
+                                     iterations=20000, max_error=2.0,
+                                     device='cuda')
+```
+
+Needs a CUDA device and a working `numba.cuda`. `fastpose.cuda.is_available()`
+tells you whether there is one; `fastpose.cuda.unavailable_reason()` says why
+not.
+
+**Warm up first.** A cold GPU estimate compiles the solver, the scorer and two
+LM kernels (local optimization and the final polish use different losses).
+That is seconds per problem, and it is easy to mistake for the steady-state
+cost:
+
+```
+fastpose-warmup --device cuda        # --device all also warms the CPU kernels
+```
+
+#### When it helps
+
+The GPU keeps thousands of hypotheses in flight, so it wins on **many
+iterations and many matches**, and loses on small problems where a round of
+kernel launches costs more than the whole CPU estimate. For
+`estimate_relative_pose` on an RTX A4000 Laptop, against the single-threaded
+CPU driver:
+
+| matches | 1000 iters | 5000 iters | 20000 iters |
+|---|---|---|---|
+| 2 000 | 1.75× | 4.48× | 7.02× |
+| 16 000 | 3.71× | 9.39× | 14.60× |
+| 50 000 | 4.21× | 10.59× | 24.54× |
+
+Reproduce with `python -m benchmarks.estimators.essential cuda-scaling`.
+
+#### What differs from the CPU result
+
+This is a *batched* LO-RANSAC, not the serial one made faster, so it does not
+reproduce the CPU result bit for bit:
+
+- **Different samples.** A run is reproducible from `(seed, batch)` on a given
+  device, but it is not the CPU driver's sample sequence.
+- **Local optimization sees one candidate per round**, gated on the same
+  criterion the CPU driver uses (a minimal model must improve the best minimal
+  score or inlier count).
+- **Adaptive termination is evaluated per round**, so it can overshoot by up
+  to one `batch`.
+- **Mixed precision.** Per-point scoring and LM arithmetic is float32; the
+  minimal solvers, the accumulators and the returned model stay float64. So
+  scores differ by ~1e-6 relative and an inlier count can differ by a point.
+
+Accuracy is held to the CPU path rather than assumed equal to it:
+`tests/test_cuda.py` checks every kernel against its CPU counterpart and
+asserts model-selection and minimizer *quality* directly, not element-wise
+tolerances alone. `Instructions.md` has the precision split, what it cost, and
+the rest of the backend's internals.
+
+#### `batch`
+
+`batch` (hypotheses per round, default 4096) is exposed for tuning, but the
+driver already picks the round schedule: full size when
+`min_iterations >= iterations` (the default), and ramping geometrically from
+256 when adaptive termination is on, so an early stop wastes at most a small
+round.
+
+Round size tracks the **iteration budget, not the match count** - 4096 beat
+128 by ~20x equally at 2 000, 16 000 and 50 000 matches - so raise it only if
+you have measured a reason to. At `iterations <= batch` there is a single
+round and the GPU is mostly idle, which is the case to avoid.
+
 `motion_from_essential` (also exported from `fastpose.estimators`) decomposes
 an externally estimated essential matrix into `(R, t)` candidates, for cases
 where you already have `E`/`F` from elsewhere.
@@ -171,6 +252,36 @@ is specialized per problem by `RansacEstimator(solver, scorer, refiner)`.
 Adding a new problem means writing the three kernels and their wrapper — the
 RANSAC loop is reused unchanged; the 5-point problem shares the Sampson
 scorer verbatim with the 7-point one and only adds a solver and a refiner.
+
+The CUDA backend reuses that structure rather than duplicating it. Kernels
+that are portable between the two backends are written once against the
+`jit(fastmath=, inline=)` shim in `src/fastpose/jit_backend.py` and built
+twice — with `njit` for the CPU and `cuda.jit(device=True)` for the GPU. Every
+minimal solver is shared this way (the 5-point chain — nullspace, constraint
+expansion, Gauss-Jordan, Danilevsky, Sturm, essential decomposition — plus
+P3P, P4Pf, the 7- and 6-point chains and the four monodepth solvers), as are
+the per-point residuals, the cheirality test and the jacobians. A problem's
+GPU-specific code is one module under `cuda/problems/`: how its solve kernel
+allocates scratch, and how the shared per-point kernels are seen by a block.
+
+Two things could not be shared, both because numba's runtime is host-only, so
+neither `np.empty` nor `.reshape` compiles in device code:
+
+- **Scratch is passed in pre-shaped.** Each `_solve_*_core` takes every
+  scratch array as an explicit argument; the CPU keeps the flat-`workspace`
+  contract through a thin wrapper that does the slicing, and the CUDA kernel
+  allocates the same pieces as `cuda.local.array` (which the hardware
+  interleaves across threads, so the accesses coalesce for free).
+- **The scorer and the LM accumulate are reductions on the GPU**, not serial
+  loops, so they are written separately and checked against the CPU kernels
+  point-for-point in the tests.
+
+The shared per-point kernels take the numba type their float literals are cast
+to (`build_sampson_point_kernels(jit, real=...)`), which is what lets the GPU
+build them in float32 while the CPU keeps float64 — a bare `1.0` in numba is a
+float64 constant and would silently promote an otherwise-float32 expression
+back to double. `kernel_cache.py` knows how to hash a numba type so this extra
+closure cell does not disable the on-disk cache.
 
 `src/fastpose/refiners/lm.py` contains a shared Levenberg-Marquardt loop
 (damping schedule, damped normal equations, accept/reject, convergence),
@@ -198,6 +309,14 @@ src/fastpose/
                    absolute,absolute_focal,monodepth}.py the per-problem kernels
     kernel_cache.py  process-independent numba cache keys for the closure-
                    specialized kernels (what makes `fastpose-warmup` stick)
+    jit_backend.py   the `jit(fastmath=, inline=)` decorator shim that lets one
+                   kernel source compile for CPU (njit) or GPU (cuda.jit)
+    cuda/          the CUDA backend, covering every problem above. cuda/ransac.py
+                   is the batched driver and cuda/{scoring,lm,reductions}.py the
+                   problem-agnostic kernels (one block per hypothesis for the
+                   scorer, one per candidate for the whole in-kernel LM loop);
+                   cuda/problem.py is the seam between them and the per-problem
+                   device code in cuda/problems/, one module each
     estimators/    the RANSAC engine (estimators/ransac.py) and the full pipelines
                    listed in the API reference above; shared helpers in
                    estimators/utils.py
@@ -480,6 +599,9 @@ layout: six columns (x1, y1, x2, y2, d1, d2) plus the two hybrid weights.
 ## Next steps
 
 - Degeneracy handling (e.g. dominant-plane checks a la DEGENSAC).
+- Benchmark the CUDA backend on a datacenter GPU. Every number on this page is
+  from a laptop RTX A4000 at 1/64-rate float64, and only `estimate_relative_pose`
+  has a `cuda-scaling` benchmark mode so far.
 
 ## Citations
 

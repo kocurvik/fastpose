@@ -14,7 +14,22 @@ picks depends on whether a callee was compiled in this process or loaded from
 the numba cache as object code (which cannot be cross-inlined), so results
 moved with the state of the on-disk cache. Measured on a solver-dominated
 benchmark, fastmath bought nothing here (0.078 s vs 0.079-0.092 s for 3000
-iterations), so the reproducibility is free.
+iterations), so the reproducibility is free. That applies to the CUDA
+instantiation too: `build_shared_focal_kernels` is called with a `jit` shim
+and every kernel here takes the shim's default `fastmath=False`.
+
+The kernels are built by `build_shared_focal_kernels(jit, ...)` so the same
+source compiles for the CPU (`njit`) and for CUDA (`cuda.jit(device=True)`).
+Its two callees are passed in rather than imported: on the CPU they must be
+the very kernels `solvers/essential.py` already instantiated (a second
+instance would duplicate their on-disk cache entries), and for CUDA they must
+come from the GPU instantiation, since a device function cannot call an `njit`
+global.
+
+`_solve_shared_focal_core` takes the two principal points as scalars and the
+coordinate columns as a 4-tuple, rather than the 8-element `data` tuple the
+CPU driver passes: the GPU driver keeps per-point columns and per-problem
+constants in separate arguments (see cuda/problem.py).
 """
 
 import math
@@ -22,11 +37,26 @@ import math
 import numpy as np
 from numba import njit
 
+from fastpose.jit_backend import cpu_jit
 from fastpose.solvers.essential import _pose_from_essential, _real_roots_sturm
 
 MODEL_SIZE = 14
 
-_COEFFS0_IND = np.array((
+# The index tables below are stored in the narrowest dtype that holds them
+# (the comment on each gives its range), not in int64. That is not a
+# micro-optimization: ptxas caps a compiled CUDA module's **global constant
+# data at 64 KB**, module-level numpy arrays read from device code land there,
+# and at int64 these tables alone are 96 KB - the solve kernel failed to link
+# with
+#
+#   ptxas error : File uses too much global constant data
+#                 (0x17f70 bytes, 0x10000 max)
+#
+# Narrowing only the integer tables brings the module to ~31.5 KB. The float
+# coefficients are deliberately left at float64: this solver is not fastmath
+# precisely because its conditioning makes last-bit changes visible (see the
+# module docstring), and there is no reason to spend that budget here.
+_COEFFS0_IND = np.array((          # 0..278, indexes coeffs (280 entries)
     0, 30, 60, 90, 120, 150, 180, 210, 240, 1, 31, 61,
     91, 121, 151, 181, 211, 241, 2, 32, 62, 92, 122, 152,
     182, 212, 242, 4, 34, 64, 30, 0, 60, 94, 124, 154,
@@ -74,8 +104,8 @@ _COEFFS0_IND = np.array((
     197, 160, 220, 227, 40, 250, 257, 262, 276, 24, 54, 84,
     49, 19, 79, 114, 144, 174, 109, 139, 169, 204, 234, 199,
     229, 259, 264, 278,
-), dtype=np.int64)
-_COEFFS1_IND = np.array((
+), dtype=np.int16)
+_COEFFS1_IND = np.array((          # 16..279, likewise
     119, 89, 149, 29, 209, 179, 239, 59, 269, 279, 116, 86,
     146, 26, 206, 176, 236, 56, 266, 277, 110, 80, 140, 20,
     200, 170, 230, 50, 260, 274, 111, 81, 141, 21, 201, 171,
@@ -98,8 +128,8 @@ _COEFFS1_IND = np.array((
     25, 205, 208, 175, 235, 238, 55, 265, 268, 269, 279, 28,
     58, 88, 55, 25, 85, 118, 148, 178, 115, 145, 175, 208,
     238, 205, 235, 265, 268, 279,
-), dtype=np.int64)
-_C0_IND = np.array((
+), dtype=np.int16)
+_C0_IND = np.array((               # 0..960, cells of the 31x31 block
     0, 1, 2, 6, 7, 8, 15, 16, 26, 31, 32, 33,
     37, 38, 39, 46, 47, 57, 62, 63, 64, 68, 69, 70,
     77, 78, 88, 93, 94, 95, 96, 97, 98, 99, 100, 101,
@@ -147,8 +177,8 @@ _C0_IND = np.array((
     918, 919, 920, 921, 922, 923, 924, 925, 928, 930, 931, 932,
     933, 934, 935, 936, 937, 938, 940, 943, 944, 945, 946, 949,
     952, 955, 956, 960,
-), dtype=np.int64)
-_C1_IND = np.array((
+), dtype=np.int16)
+_C1_IND = np.array((               # 9..464, cells of the 31x15 block
     9, 11, 12, 17, 18, 20, 21, 23, 24, 27, 40, 42,
     43, 48, 49, 51, 52, 54, 55, 58, 71, 73, 74, 79,
     80, 82, 83, 85, 86, 89, 102, 104, 105, 110, 111, 113,
@@ -171,13 +201,19 @@ _C1_IND = np.array((
     420, 421, 422, 423, 424, 425, 426, 427, 428, 429, 432, 434,
     435, 436, 437, 438, 439, 440, 441, 442, 444, 447, 448, 449,
     450, 453, 456, 459, 460, 464,
-), dtype=np.int64)
-_AM_IND = np.array((
+), dtype=np.int16)
+_AM_IND = np.array((               # 0..19, action-matrix source rows
     15, 11, 0, 1, 2, 12, 3, 16, 4, 5, 17, 6,
     18, 19, 7,
-), dtype=np.int64)
+), dtype=np.int8)
 
-_COEFF_TERM_START = np.array((
+# The eight action-matrix rows `_fast_eigenvector_solution` reads. This used to
+# be a tuple literal indexed by the loop variable; module-level numpy arrays
+# read as constants are known to work in device code, dynamic indexing of a
+# tuple is not (Instructions.md section 1).
+_EIG_IND = np.array((2, 3, 4, 6, 8, 9, 11, 14), dtype=np.int8)
+
+_COEFF_TERM_START = np.array((     # 0..2520, term-table offsets
     0, 2, 7, 12, 14, 20, 34, 48, 54, 59, 68, 73,
     78, 88, 98, 103, 117, 141, 155, 160, 165, 175, 191, 201,
     215, 229, 231, 241, 251, 257, 262, 264, 269, 274, 276, 282,
@@ -202,7 +238,7 @@ _COEFF_TERM_START = np.array((
     2135, 2155, 2175, 2183, 2191, 2203, 2211, 2212, 2213, 2233, 2269, 2289,
     2297, 2305, 2306, 2326, 2346, 2350, 2358, 2364, 2382, 2400, 2406, 2424,
     2460, 2478, 2496, 2514, 2520,
-), dtype=np.int64)
+), dtype=np.int16)
 _COEFF_TERM_FACTOR = np.array((
     -1.0, 2.0, -2.0, 2.0, 2.0, 2.0, -1.0, -1.0,
     2.0, 2.0, -2.0, 2.0, -1.0, 2.0, 1.0, -1.0,
@@ -520,7 +556,7 @@ _COEFF_TERM_FACTOR = np.array((
     1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0,
     1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0,
 ), dtype=np.float64)
-_COEFF_TERM_A = np.array((
+_COEFF_TERM_A = np.array((         # 0..26, indexes d (27 entries)
     9, 11, 9, 11, 11, 15, 17, 9, 11, 15, 17, 17,
     18, 20, 9, 9, 9, 9, 10, 11, 9, 9, 9, 9,
     10, 10, 11, 11, 11, 12, 14, 15, 15, 16, 9, 9,
@@ -731,8 +767,8 @@ _COEFF_TERM_A = np.array((
     1, 1, 2, 2, 2, 2, 3, 3, 4, 4, 5, 5,
     0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
     3, 3, 4, 4, 5, 5, 0, 0, 1, 1, 2, 2,
-), dtype=np.int64)
-_COEFF_TERM_B = np.array((
+), dtype=np.uint8)
+_COEFF_TERM_B = np.array((         # 0..26, likewise
     17, 15, 17, 15, 17, 17, 17, 26, 24, 20, 18, 20,
     26, 24, 11, 14, 15, 16, 15, 12, 11, 14, 15, 16,
     15, 16, 11, 12, 14, 14, 14, 15, 16, 16, 20, 23,
@@ -943,8 +979,8 @@ _COEFF_TERM_B = np.array((
     6, 8, 3, 4, 6, 7, 7, 8, 6, 8, 6, 7,
     4, 5, 7, 8, 3, 5, 6, 8, 3, 4, 6, 7,
     7, 8, 6, 8, 6, 7, 4, 5, 3, 5, 3, 4,
-), dtype=np.int64)
-_COEFF_TERM_C = np.array((
+), dtype=np.uint8)
+_COEFF_TERM_C = np.array((         # 0..26, likewise
     17, 17, 26, 26, 24, 20, 18, 26, 26, 26, 26, 24,
     26, 26, 11, 14, 15, 16, 16, 14, 20, 23, 24, 25,
     25, 24, 18, 23, 21, 20, 18, 18, 19, 18, 20, 23,
@@ -1155,7 +1191,7 @@ _COEFF_TERM_C = np.array((
     14, 12, 16, 15, 13, 12, 11, 10, 11, 9, 10, 9,
     26, 25, 23, 22, 26, 24, 23, 21, 25, 24, 22, 21,
     20, 19, 20, 18, 19, 18, 8, 7, 8, 6, 7, 6,
-), dtype=np.int64)
+), dtype=np.uint8)
 
 
 
@@ -1177,272 +1213,434 @@ _MIX_21 = -0.5660808970350308
 _MIX_22 = 0.45579152232219433
 
 
-@njit(cache=True)
-def _nullspace_6pt(A, N):
-    # 3-dimensional nullspace of the 6x9 epipolar system via Gaussian
-    # elimination (pivots on columns 0..5, free variables 6..8), modified
-    # Gram-Schmidt and a fixed dense rotation of the basis (no LAPACK SVD).
-    # The resulting N is stored as rows.
-    for col in range(6):
-        piv = col
-        max_val = abs(A[col, col])
-        for r in range(col + 1, 6):
-            v = abs(A[r, col])
-            if v > max_val:
-                max_val = v
-                piv = r
-        if max_val < 1e-12:
-            return False
-        if piv != col:
-            for c in range(col, 9):
-                t = A[col, c]
-                A[col, c] = A[piv, c]
-                A[piv, c] = t
-        inv = 1.0 / A[col, col]
-        for r in range(col + 1, 6):
-            factor = A[r, col] * inv
-            if factor != 0.0:
-                A[r, col] = 0.0
-                for c in range(col + 1, 9):
-                    A[r, c] -= factor * A[col, c]
+def build_shared_focal_kernels(jit, real_roots_sturm,
+                               pose_from_essential):
 
-    for b in range(3):
-        free_col = 6 + b
-        for j in range(9):
-            N[b, j] = 0.0
-        N[b, free_col] = 1.0
-        for r in range(5, -1, -1):
-            s = A[r, free_col]
-            for c in range(r + 1, 6):
-                s += A[r, c] * N[b, c]
-            N[b, r] = -s / A[r, r]
+    @jit()
+    def _nullspace_6pt(A, N):
+        # 3-dimensional nullspace of the 6x9 epipolar system via Gaussian
+        # elimination (pivots on columns 0..5, free variables 6..8), modified
+        # Gram-Schmidt and a fixed dense rotation of the basis (no LAPACK SVD).
+        # The resulting N is stored as rows.
+        for col in range(6):
+            piv = col
+            max_val = abs(A[col, col])
+            for r in range(col + 1, 6):
+                v = abs(A[r, col])
+                if v > max_val:
+                    max_val = v
+                    piv = r
+            if max_val < 1e-12:
+                return False
+            if piv != col:
+                for c in range(col, 9):
+                    t = A[col, c]
+                    A[col, c] = A[piv, c]
+                    A[piv, c] = t
+            inv = 1.0 / A[col, col]
+            for r in range(col + 1, 6):
+                factor = A[r, col] * inv
+                if factor != 0.0:
+                    A[r, col] = 0.0
+                    for c in range(col + 1, 9):
+                        A[r, c] -= factor * A[col, c]
 
-    for b in range(3):
-        for k in range(b):
-            dot = 0.0
+        for b in range(3):
+            free_col = 6 + b
             for j in range(9):
-                dot += N[b, j] * N[k, j]
+                N[b, j] = 0.0
+            N[b, free_col] = 1.0
+            for r in range(5, -1, -1):
+                s = A[r, free_col]
+                for c in range(r + 1, 6):
+                    s += A[r, c] * N[b, c]
+                N[b, r] = -s / A[r, r]
+
+        for b in range(3):
+            for k in range(b):
+                dot = 0.0
+                for j in range(9):
+                    dot += N[b, j] * N[k, j]
+                for j in range(9):
+                    N[b, j] -= dot * N[k, j]
+            norm = 0.0
             for j in range(9):
-                N[b, j] -= dot * N[k, j]
-        norm = 0.0
+                norm += N[b, j] * N[b, j]
+            if norm < 1e-24:
+                return False
+            inv = 1.0 / math.sqrt(norm)
+            for j in range(9):
+                N[b, j] *= inv
+
         for j in range(9):
-            norm += N[b, j] * N[b, j]
-        if norm < 1e-24:
-            return False
-        inv = 1.0 / math.sqrt(norm)
-        for j in range(9):
-            N[b, j] *= inv
+            v0 = N[0, j]
+            v1 = N[1, j]
+            v2 = N[2, j]
+            N[0, j] = _MIX_00 * v0 + _MIX_01 * v1 + _MIX_02 * v2
+            N[1, j] = _MIX_10 * v0 + _MIX_11 * v1 + _MIX_12 * v2
+            N[2, j] = _MIX_20 * v0 + _MIX_21 * v1 + _MIX_22 * v2
+        return True
 
-    for j in range(9):
-        v0 = N[0, j]
-        v1 = N[1, j]
-        v2 = N[2, j]
-        N[0, j] = _MIX_00 * v0 + _MIX_01 * v1 + _MIX_02 * v2
-        N[1, j] = _MIX_10 * v0 + _MIX_11 * v1 + _MIX_12 * v2
-        N[2, j] = _MIX_20 * v0 + _MIX_21 * v1 + _MIX_22 * v2
-    return True
+    @jit()
+    def _fill_coeffs(d, coeffs):
+        # every term is a factor times a product of exactly three entries of d
+        for ci in range(280):
+            acc = 0.0
+            for ti in range(_COEFF_TERM_START[ci], _COEFF_TERM_START[ci + 1]):
+                acc += (_COEFF_TERM_FACTOR[ti] * d[_COEFF_TERM_A[ti]]
+                        * d[_COEFF_TERM_B[ti]] * d[_COEFF_TERM_C[ti]])
+            coeffs[ci] = acc
 
-
-@njit(cache=True)
-def _fill_coeffs(d, coeffs):
-    # every term is a factor times a product of exactly three entries of d
-    for ci in range(280):
-        acc = 0.0
-        for ti in range(_COEFF_TERM_START[ci], _COEFF_TERM_START[ci + 1]):
-            acc += (_COEFF_TERM_FACTOR[ti] * d[_COEFF_TERM_A[ti]]
-                    * d[_COEFF_TERM_B[ti]] * d[_COEFF_TERM_C[ti]])
-        coeffs[ci] = acc
-
-
-@njit(cache=True)
-def _solve_linear_31x15(C, C12):
-    # C12 <- C0^-1 C1 for the augmented matrix C = [C0 | C1] (31, 46), via
-    # Gaussian elimination with partial pivoting; the augmented layout keeps
-    # the row operations in one contiguous inner loop
-    n = 31
-    m = 15
-    scale = 0.0
-    for r in range(n):
-        for c in range(n):
-            v = abs(C[r, c])
-            if v > scale:
-                scale = v
-    if scale == 0.0:
-        return False
-    tol = 1e-12 * scale
-    for col in range(n):
-        piv = col
-        max_val = abs(C[col, col])
-        for r in range(col + 1, n):
-            v = abs(C[r, col])
-            if v > max_val:
-                max_val = v
-                piv = r
-        if max_val < tol:
-            return False
-        if piv != col:
-            for c in range(col, n + m):
-                t = C[col, c]
-                C[col, c] = C[piv, c]
-                C[piv, c] = t
-        inv = 1.0 / C[col, col]
-        for r in range(col + 1, n):
-            factor = C[r, col] * inv
-            if factor != 0.0:
-                C[r, col] = 0.0
-                for c in range(col + 1, n + m):
-                    C[r, c] -= factor * C[col, c]
-    for r in range(n - 1, -1, -1):
-        inv = 1.0 / C[r, r]
-        for c in range(m):
-            s = C[r, n + c]
-            for k in range(r + 1, n):
-                s -= C[r, k] * C12[k, c]
-            C12[r, c] = s * inv
-    return True
-
-
-@njit(cache=True)
-def _charpoly_danilevsky_n(T, coef, row, tmp_row, n):
-    for i in range(n - 1, 0, -1):
-        piv_ind = i - 1
-        piv = abs(T[i, i - 1])
-        for j in range(i - 1):
-            v = abs(T[i, j])
-            if v > piv:
-                piv = v
-                piv_ind = j
-        if piv < 1e-14:
-            return False
-        if piv_ind != i - 1:
+    @jit()
+    def _solve_linear_31x15(C, C12):
+        # C12 <- C0^-1 C1 for the augmented matrix C = [C0 | C1] (31, 46), via
+        # Gaussian elimination with partial pivoting; the augmented layout keeps
+        # the row operations in one contiguous inner loop
+        n = 31
+        m = 15
+        scale = 0.0
+        for r in range(n):
             for c in range(n):
-                t = T[piv_ind, c]
-                T[piv_ind, c] = T[i - 1, c]
-                T[i - 1, c] = t
-            for r in range(n):
-                t = T[r, piv_ind]
-                T[r, piv_ind] = T[r, i - 1]
-                T[r, i - 1] = t
-        for c in range(n):
-            row[c] = T[i, c]
-        inv = 1.0 / row[i - 1]
-        for r in range(i + 1):
-            colv = T[r, i - 1]
-            if colv != 0.0:
-                f = colv * inv
-                for c in range(n):
-                    T[r, c] -= row[c] * f
-                T[r, i - 1] = f
-            else:
-                T[r, i - 1] = 0.0
-        for c in range(n):
-            s = 0.0
-            for k in range(n):
-                s += row[k] * T[k, c]
-            tmp_row[c] = s
-        for c in range(n):
-            T[i - 1, c] = tmp_row[c]
-            T[i, c] = 0.0
-        T[i, i - 1] = 1.0
-    coef[n] = 1.0
-    for k in range(n):
-        coef[n - 1 - k] = -T[0, k]
-    return True
-
-
-@njit(cache=True)
-def _solve_7x7(A, b, x):
-    n = 7
-    scale = 0.0
-    for r in range(n):
-        for c in range(n):
-            v = abs(A[r, c])
-            if v > scale:
-                scale = v
-    if scale == 0.0:
-        return False
-    tol = 1e-12 * scale
-    for col in range(n):
-        piv = col
-        max_val = abs(A[col, col])
-        for r in range(col + 1, n):
-            v = abs(A[r, col])
-            if v > max_val:
-                max_val = v
-                piv = r
-        if max_val < tol:
+                v = abs(C[r, c])
+                if v > scale:
+                    scale = v
+        if scale == 0.0:
             return False
-        if piv != col:
-            for c in range(col, n):
-                t = A[col, c]
-                A[col, c] = A[piv, c]
-                A[piv, c] = t
-            tb = b[col]
-            b[col] = b[piv]
-            b[piv] = tb
-        inv = 1.0 / A[col, col]
-        for r in range(col + 1, n):
-            factor = A[r, col] * inv
-            if factor != 0.0:
-                A[r, col] = 0.0
-                for c in range(col + 1, n):
-                    A[r, c] -= factor * A[col, c]
-                b[r] -= factor * b[col]
-    for r in range(n - 1, -1, -1):
-        s = b[r]
-        for c in range(r + 1, n):
-            s -= A[r, c] * x[c]
-        x[r] = s / A[r, r]
-    return True
+        tol = 1e-12 * scale
+        for col in range(n):
+            piv = col
+            max_val = abs(C[col, col])
+            for r in range(col + 1, n):
+                v = abs(C[r, col])
+                if v > max_val:
+                    max_val = v
+                    piv = r
+            if max_val < tol:
+                return False
+            if piv != col:
+                for c in range(col, n + m):
+                    t = C[col, c]
+                    C[col, c] = C[piv, c]
+                    C[piv, c] = t
+            inv = 1.0 / C[col, col]
+            for r in range(col + 1, n):
+                factor = C[r, col] * inv
+                if factor != 0.0:
+                    C[r, col] = 0.0
+                    for c in range(col + 1, n + m):
+                        C[r, c] -= factor * C[col, c]
+        for r in range(n - 1, -1, -1):
+            inv = 1.0 / C[r, r]
+            for c in range(m):
+                s = C[r, n + c]
+                for k in range(r + 1, n):
+                    s -= C[r, k] * C12[k, c]
+                C12[r, c] = s * inv
+        return True
+
+    @jit()
+    def _charpoly_danilevsky_n(T, coef, row, tmp_row, n):
+        for i in range(n - 1, 0, -1):
+            piv_ind = i - 1
+            piv = abs(T[i, i - 1])
+            for j in range(i - 1):
+                v = abs(T[i, j])
+                if v > piv:
+                    piv = v
+                    piv_ind = j
+            if piv < 1e-14:
+                return False
+            if piv_ind != i - 1:
+                for c in range(n):
+                    t = T[piv_ind, c]
+                    T[piv_ind, c] = T[i - 1, c]
+                    T[i - 1, c] = t
+                for r in range(n):
+                    t = T[r, piv_ind]
+                    T[r, piv_ind] = T[r, i - 1]
+                    T[r, i - 1] = t
+            for c in range(n):
+                row[c] = T[i, c]
+            inv = 1.0 / row[i - 1]
+            for r in range(i + 1):
+                colv = T[r, i - 1]
+                if colv != 0.0:
+                    f = colv * inv
+                    for c in range(n):
+                        T[r, c] -= row[c] * f
+                    T[r, i - 1] = f
+                else:
+                    T[r, i - 1] = 0.0
+            for c in range(n):
+                s = 0.0
+                for k in range(n):
+                    s += row[k] * T[k, c]
+                tmp_row[c] = s
+            for c in range(n):
+                T[i - 1, c] = tmp_row[c]
+                T[i, c] = 0.0
+            T[i, i - 1] = 1.0
+        coef[n] = 1.0
+        for k in range(n):
+            coef[n - 1 - k] = -T[0, k]
+        return True
+
+    @jit()
+    def _solve_7x7(A, b, x):
+        n = 7
+        scale = 0.0
+        for r in range(n):
+            for c in range(n):
+                v = abs(A[r, c])
+                if v > scale:
+                    scale = v
+        if scale == 0.0:
+            return False
+        tol = 1e-12 * scale
+        for col in range(n):
+            piv = col
+            max_val = abs(A[col, col])
+            for r in range(col + 1, n):
+                v = abs(A[r, col])
+                if v > max_val:
+                    max_val = v
+                    piv = r
+            if max_val < tol:
+                return False
+            if piv != col:
+                for c in range(col, n):
+                    t = A[col, c]
+                    A[col, c] = A[piv, c]
+                    A[piv, c] = t
+                tb = b[col]
+                b[col] = b[piv]
+                b[piv] = tb
+            inv = 1.0 / A[col, col]
+            for r in range(col + 1, n):
+                factor = A[r, col] * inv
+                if factor != 0.0:
+                    A[r, col] = 0.0
+                    for c in range(col + 1, n):
+                        A[r, c] -= factor * A[col, c]
+                    b[r] -= factor * b[col]
+        for r in range(n - 1, -1, -1):
+            s = b[r]
+            for c in range(r + 1, n):
+                s -= A[r, c] * x[c]
+            x[r] = s / A[r, r]
+        return True
+
+    @jit()
+    def _fast_eigenvector_solution(lam, AM, sol, A, b, x, vals):
+        # A (7, 7), b (7), x (7) and vals (8) are caller-provided scratch
+        z0 = lam
+        z1 = z0 * z0
+        z2 = z1 * z0
+        for ii in range(8):
+            row = _EIG_IND[ii]
+            vals[0] = AM[row, 2]
+            vals[1] = AM[row, 6]
+            vals[2] = z0 * AM[row, 4] + AM[row, 5]
+            vals[3] = AM[row, 1] + z0 * AM[row, 3]
+            vals[4] = AM[row, 14]
+            vals[5] = z0 * AM[row, 11] + AM[row, 13]
+            vals[6] = z1 * AM[row, 9] + z0 * AM[row, 10] + AM[row, 12]
+            vals[7] = AM[row, 0] + z0 * AM[row, 7] + z1 * AM[row, 8]
+            if ii == 0:
+                vals[0] -= z0
+            elif ii == 3:
+                vals[1] -= z0
+            elif ii == 2:
+                vals[2] -= z1
+            elif ii == 1:
+                vals[3] -= z1
+            elif ii == 7:
+                vals[4] -= z0
+            elif ii == 6:
+                vals[5] -= z1
+            elif ii == 5:
+                vals[6] -= z2
+            elif ii == 4:
+                vals[7] -= z2
+            if ii < 7:
+                for c in range(7):
+                    A[ii, c] = vals[c]
+                b[ii] = -vals[7]
+        if not _solve_7x7(A, b, x):
+            return False
+        sol[0] = x[3]
+        sol[1] = z0
+        sol[2] = x[6]
+        return True
+
+    @jit()
+    def _solver_core(d, sols, coeffs, C, C12, RR, AM, AMp, coef, roots, row,
+                     tmp_row, chain, lo_stack, hi_stack, A7, b7, x7, vals, sol,
+                     degs, slo_stack, shi_stack):
+        # scratch is passed in pre-shaped: see the note above the factory
+        _fill_coeffs(d, coeffs)
+        for r in range(31):
+            for c in range(46):
+                C[r, c] = 0.0
+        for i in range(556):
+            idx = _C0_IND[i]
+            C[idx % 31, idx // 31] = coeffs[_COEFFS0_IND[i]]
+        for i in range(258):
+            idx = _C1_IND[i]
+            C[idx % 31, 31 + idx // 31] = coeffs[_COEFFS1_IND[i]]
+        if not _solve_linear_31x15(C, C12):
+            return 0
+
+        for r in range(8):
+            for c in range(15):
+                RR[r, c] = -C12[23 + r, c]
+        for r in range(15):
+            for c in range(15):
+                RR[8 + r, c] = 1.0 if r == c else 0.0
+        for i in range(15):
+            rr = _AM_IND[i]
+            for c in range(15):
+                AM[i, c] = RR[rr, c]
+                AMp[i, c] = RR[rr, c]
+
+        if not _charpoly_danilevsky_n(AMp, coef, row, tmp_row, 15):
+            return 0
+        n_roots = real_roots_sturm(coef, 15, chain, degs, roots,
+                                   lo_stack, hi_stack, slo_stack, shi_stack)
+        count = 0
+        for i in range(n_roots):
+            if _fast_eigenvector_solution(roots[i], AM, sol, A7, b7, x7, vals):
+                sols[count, 0] = sol[0]
+                sols[count, 1] = sol[1]
+                sols[count, 2] = sol[2]
+                count += 1
+        return count
+
+    @jit()
+    def _solve_shared_focal_core(data, sample, models, pp1x, pp1y, pp2x, pp2y,
+                                 A, N, d, sols, e, Rbuf, coeffs, C, C12, RR,
+                                 AM, AMp, coef, roots, row, tmp_row, chain,
+                                 lo_stack, hi_stack, A7, b7, x7, vals, sol,
+                                 degs, slo_stack, shi_stack):
+        # scratch is passed in pre-shaped: see the note above the factory
+        x1_x, x1_y, x2_x, x2_y = data
+
+        for k in range(6):
+            idx = sample[k]
+            x = x1_x[idx] - pp1x
+            y = x1_y[idx] - pp1y
+            xp = x2_x[idx] - pp2x
+            yp = x2_y[idx] - pp2y
+            # PoseLib's generated solver uses Eigen's column-major vec(F):
+            # [F00, F10, F20, F01, F11, F21, F02, F12, F22].
+            A[k, 0] = x * xp
+            A[k, 1] = x * yp
+            A[k, 2] = x
+            A[k, 3] = y * xp
+            A[k, 4] = y * yp
+            A[k, 5] = y
+            A[k, 6] = xp
+            A[k, 7] = yp
+            A[k, 8] = 1.0
+        if not _nullspace_6pt(A, N):
+            return 0
+        # PoseLib maps Eigen's column-major 9x3 nullspace matrix into a vector.
+        for c in range(3):
+            for r in range(9):
+                d[9 * c + r] = N[c, r]
+
+        n_sols = _solver_core(d, sols, coeffs, C, C12, RR, AM, AMp, coef,
+                              roots, row, tmp_row, chain, lo_stack, hi_stack,
+                              A7, b7, x7, vals, sol, degs, slo_stack,
+                              shi_stack)
+        count = 0
+        for i in range(n_sols):
+            if count >= models.shape[0]:
+                break
+            inv_f_sq = sols[i, 2]
+            if inv_f_sq <= 1e-12:
+                continue
+            focal = math.sqrt(1.0 / inv_f_sq)
+            for j in range(9):
+                e[j] = N[0, j] + sols[i, 0] * N[1, j] + sols[i, 1] * N[2, j]
+            norm = 0.0
+            for j in range(9):
+                norm += e[j] * e[j]
+            if norm < 1e-24:
+                continue
+            inv = 1.0 / math.sqrt(norm)
+            for j in range(9):
+                e[j] *= inv
+            # Convert column-major F to row-major E = K^T F K with shared focal
+            # and zero-centered coordinates.
+            f00 = e[0]
+            f10 = e[1]
+            f20 = e[2]
+            f01 = e[3]
+            f11 = e[4]
+            f21 = e[5]
+            f02 = e[6]
+            f12 = e[7]
+            f22 = e[8]
+            ff = focal * focal
+            e[0] = ff * f00
+            e[1] = ff * f01
+            e[2] = focal * f02
+            e[3] = ff * f10
+            e[4] = ff * f11
+            e[5] = focal * f12
+            e[6] = focal * f20
+            e[7] = focal * f21
+            e[8] = f22
+            num_poses = pose_from_essential(e, (x1_x, x1_y, x2_x, x2_y),
+                                            sample, pp1x, pp1y, pp2x, pp2y,
+                                            focal, focal, models, count, Rbuf)
+            for k in range(count, count + num_poses):
+                models[k, 12] = focal
+                models[k, 13] = focal
+            count += num_poses
+        return count
+
+    return {
+        'nullspace_6pt': _nullspace_6pt,
+        'fill_coeffs': _fill_coeffs,
+        'solve_linear_31x15': _solve_linear_31x15,
+        'charpoly_danilevsky_n': _charpoly_danilevsky_n,
+        'solve_7x7': _solve_7x7,
+        'fast_eigenvector_solution': _fast_eigenvector_solution,
+        'solver_core': _solver_core,
+        'solve_shared_focal_core': _solve_shared_focal_core,
+    }
 
 
-@njit(cache=True)
-def _fast_eigenvector_solution(lam, AM, sol, A, b, x, vals):
-    # A (7, 7), b (7), x (7) and vals (8) are caller-provided scratch
-    ind = (2, 3, 4, 6, 8, 9, 11, 14)
-    z0 = lam
-    z1 = z0 * z0
-    z2 = z1 * z0
-    for ii in range(8):
-        row = ind[ii]
-        vals[0] = AM[row, 2]
-        vals[1] = AM[row, 6]
-        vals[2] = z0 * AM[row, 4] + AM[row, 5]
-        vals[3] = AM[row, 1] + z0 * AM[row, 3]
-        vals[4] = AM[row, 14]
-        vals[5] = z0 * AM[row, 11] + AM[row, 13]
-        vals[6] = z1 * AM[row, 9] + z0 * AM[row, 10] + AM[row, 12]
-        vals[7] = AM[row, 0] + z0 * AM[row, 7] + z1 * AM[row, 8]
-        if ii == 0:
-            vals[0] -= z0
-        elif ii == 3:
-            vals[1] -= z0
-        elif ii == 2:
-            vals[2] -= z1
-        elif ii == 1:
-            vals[3] -= z1
-        elif ii == 7:
-            vals[4] -= z0
-        elif ii == 6:
-            vals[5] -= z1
-        elif ii == 5:
-            vals[6] -= z2
-        elif ii == 4:
-            vals[7] -= z2
-        if ii < 7:
-            for c in range(7):
-                A[ii, c] = vals[c]
-            b[ii] = -vals[7]
-    if not _solve_7x7(A, b, x):
-        return False
-    sol[0] = x[3]
-    sol[1] = z0
-    sol[2] = x[6]
-    return True
+_CPU = build_shared_focal_kernels(cpu_jit, _real_roots_sturm,
+                                  _pose_from_essential)
+
+# module-level names other modules and the tests import; these are the CPU
+# kernels, byte-for-byte the same source as before the factory.
+# `solvers/monodepth.py` imports _charpoly_danilevsky_n from here.
+_nullspace_6pt = _CPU['nullspace_6pt']
+_fill_coeffs = _CPU['fill_coeffs']
+_solve_linear_31x15 = _CPU['solve_linear_31x15']
+_charpoly_danilevsky_n = _CPU['charpoly_danilevsky_n']
+_solve_7x7 = _CPU['solve_7x7']
+_fast_eigenvector_solution = _CPU['fast_eigenvector_solution']
+_solver_core = _CPU['solver_core']
+_solve_shared_focal_core = _CPU['solve_shared_focal_core']
+
+# scratch layout of the flat workspace, shared by the CPU wrappers below and by
+# the CUDA kernel, which allocates the same pieces as per-thread local arrays.
+# The 3482 doubles of the polynomial solver dominate; see SOLVER_FLOATS.
+SOLVER_FLOATS = 3482
+WORKSPACE_INTS = 145
 
 
 @njit(cache=True)
 def _solver_shared_focal_relpose_6pt(d, sols, workspace):
+    # RANSAC-driver-independent entry point kept for callers of the polynomial
+    # solver alone: carves the flat workspace into the pre-shaped scratch
+    # `_solver_core` wants. CPU-only - `.reshape` does not compile for CUDA,
+    # where the kernel allocates the same pieces with `cuda.local.array`.
     o = 0
     coeffs = workspace[o:o + 280]
     o += 280
@@ -1479,52 +1677,23 @@ def _solver_shared_focal_relpose_6pt(d, sols, workspace):
     vals = workspace[o:o + 8]
     o += 8
 
-    _fill_coeffs(d, coeffs)
-    for r in range(31):
-        for c in range(46):
-            C[r, c] = 0.0
-    for i in range(556):
-        idx = _C0_IND[i]
-        C[idx % 31, idx // 31] = coeffs[_COEFFS0_IND[i]]
-    for i in range(258):
-        idx = _C1_IND[i]
-        C[idx % 31, 31 + idx // 31] = coeffs[_COEFFS1_IND[i]]
-    if not _solve_linear_31x15(C, C12):
-        return 0
-
-    for r in range(8):
-        for c in range(15):
-            RR[r, c] = -C12[23 + r, c]
-    for r in range(15):
-        for c in range(15):
-            RR[8 + r, c] = 1.0 if r == c else 0.0
-    for i in range(15):
-        rr = _AM_IND[i]
-        for c in range(15):
-            AM[i, c] = RR[rr, c]
-            AMp[i, c] = RR[rr, c]
-
-    if not _charpoly_danilevsky_n(AMp, coef, row, tmp_row, 15):
-        return 0
-    iw = np.empty(145, dtype=np.int64)
+    iw = np.empty(WORKSPACE_INTS, dtype=np.int64)
     degs = iw[0:16]
     slo_stack = iw[16:80]
     shi_stack = iw[80:144]
-    n_roots = _real_roots_sturm(coef, 15, chain, degs, roots,
-                                lo_stack, hi_stack, slo_stack, shi_stack)
-    count = 0
     sol = np.empty(3)
-    for i in range(n_roots):
-        if _fast_eigenvector_solution(roots[i], AM, sol, A7, b7, x7, vals):
-            sols[count, 0] = sol[0]
-            sols[count, 1] = sol[1]
-            sols[count, 2] = sol[2]
-            count += 1
-    return count
+    return _solver_core(d, sols, coeffs, C, C12, RR, AM, AMp, coef, roots, row,
+                        tmp_row, chain, lo_stack, hi_stack, A7, b7, x7, vals,
+                        sol, degs, slo_stack, shi_stack)
 
 
 @njit(cache=True)
 def _solve_shared_focal_6pt(data, sample, models, workspace):
+    # RANSAC-driver entry point: unpacks the 8-element `data` tuple and carves
+    # the flat workspace into the pre-shaped scratch the core wants. CPU-only -
+    # `.reshape` does not compile for CUDA, where the kernel allocates the same
+    # pieces with `cuda.local.array` and reads the principal points out of the
+    # problem's `params` vector.
     x1_x, x1_y, x2_x, x2_y, pp1x, pp1y, pp2x, pp2y = data
     o = 0
     A = workspace[o:o + 54].reshape(6, 9)
@@ -1539,80 +1708,52 @@ def _solve_shared_focal_6pt(data, sample, models, workspace):
     o += 9
     Rbuf = workspace[o:o + 18].reshape(2, 3, 3)
     o += 18
-    solver_ws = workspace[o:]
 
-    for k in range(6):
-        idx = sample[k]
-        x = x1_x[idx] - pp1x
-        y = x1_y[idx] - pp1y
-        xp = x2_x[idx] - pp2x
-        yp = x2_y[idx] - pp2y
-        # PoseLib's generated solver uses Eigen's column-major vec(F):
-        # [F00, F10, F20, F01, F11, F21, F02, F12, F22].
-        A[k, 0] = x * xp
-        A[k, 1] = x * yp
-        A[k, 2] = x
-        A[k, 3] = y * xp
-        A[k, 4] = y * yp
-        A[k, 5] = y
-        A[k, 6] = xp
-        A[k, 7] = yp
-        A[k, 8] = 1.0
-    if not _nullspace_6pt(A, N):
-        return 0
-    # PoseLib maps Eigen's column-major 9x3 nullspace matrix into a vector.
-    for c in range(3):
-        for r in range(9):
-            d[9 * c + r] = N[c, r]
+    coeffs = workspace[o:o + 280]
+    o += 280
+    C = workspace[o:o + 1426].reshape(31, 46)
+    o += 1426
+    C12 = workspace[o:o + 465].reshape(31, 15)
+    o += 465
+    RR = workspace[o:o + 345].reshape(23, 15)
+    o += 345
+    AM = workspace[o:o + 225].reshape(15, 15)
+    o += 225
+    AMp = workspace[o:o + 225].reshape(15, 15)
+    o += 225
+    coef = workspace[o:o + 16]
+    o += 16
+    roots = workspace[o:o + 15]
+    o += 15
+    row = workspace[o:o + 15]
+    o += 15
+    tmp_row = workspace[o:o + 15]
+    o += 15
+    chain = workspace[o:o + 256].reshape(16, 16)
+    o += 256
+    lo_stack = workspace[o:o + 64]
+    o += 64
+    hi_stack = workspace[o:o + 64]
+    o += 64
+    A7 = workspace[o:o + 49].reshape(7, 7)
+    o += 49
+    b7 = workspace[o:o + 7]
+    o += 7
+    x7 = workspace[o:o + 7]
+    o += 7
+    vals = workspace[o:o + 8]
+    o += 8
 
-    n_sols = _solver_shared_focal_relpose_6pt(d, sols, solver_ws)
-    count = 0
-    for i in range(n_sols):
-        if count >= models.shape[0]:
-            break
-        inv_f_sq = sols[i, 2]
-        if inv_f_sq <= 1e-12:
-            continue
-        focal = math.sqrt(1.0 / inv_f_sq)
-        for j in range(9):
-            e[j] = N[0, j] + sols[i, 0] * N[1, j] + sols[i, 1] * N[2, j]
-        norm = 0.0
-        for j in range(9):
-            norm += e[j] * e[j]
-        if norm < 1e-24:
-            continue
-        inv = 1.0 / math.sqrt(norm)
-        for j in range(9):
-            e[j] *= inv
-        # Convert column-major F to row-major E = K^T F K with shared focal
-        # and zero-centered coordinates.
-        f00 = e[0]
-        f10 = e[1]
-        f20 = e[2]
-        f01 = e[3]
-        f11 = e[4]
-        f21 = e[5]
-        f02 = e[6]
-        f12 = e[7]
-        f22 = e[8]
-        ff = focal * focal
-        e[0] = ff * f00
-        e[1] = ff * f01
-        e[2] = focal * f02
-        e[3] = ff * f10
-        e[4] = ff * f11
-        e[5] = focal * f12
-        e[6] = focal * f20
-        e[7] = focal * f21
-        e[8] = f22
-        num_poses = _pose_from_essential(e, (x1_x, x1_y, x2_x, x2_y), sample,
-                                         pp1x, pp1y, pp2x, pp2y, focal, focal,
-                                         models, count, Rbuf)
-        for k in range(count, count + num_poses):
-            models[k, 12] = focal
-            models[k, 13] = focal
-        count += num_poses
-    return count
+    iw = np.empty(WORKSPACE_INTS, dtype=np.int64)
+    degs = iw[0:16]
+    slo_stack = iw[16:80]
+    shi_stack = iw[80:144]
+    sol = np.empty(3)
+    return _solve_shared_focal_core(
+        (x1_x, x1_y, x2_x, x2_y), sample, models, pp1x, pp1y, pp2x, pp2y,
+        A, N, d, sols, e, Rbuf, coeffs, C, C12, RR, AM, AMp, coef, roots, row,
+        tmp_row, chain, lo_stack, hi_stack, A7, b7, x7, vals, sol, degs,
+        slo_stack, shi_stack)
 
 
 class SixPointSharedFocalSolver():
@@ -1623,3 +1764,4 @@ class SixPointSharedFocalSolver():
     max_models = 60
     workspace_size = 3662
     solve = staticmethod(_solve_shared_focal_6pt)
+

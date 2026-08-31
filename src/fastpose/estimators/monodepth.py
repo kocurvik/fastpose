@@ -31,8 +31,9 @@ refiners/losses.py).
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
-                                       unproject_pair)
+from fastpose.estimators.utils import (build_info, check_device,
+                                       check_min_points, failure_info,
+                                       get_cuda_estimator, unproject_pair)
 from fastpose.refiners.losses import get_loss
 from fastpose.refiners.monodepth import (LMMonoDepthPoseRefiner,
                                 LMMonoDepthSharedFocalPoseRefiner,
@@ -95,6 +96,26 @@ def _monodepth_data(x1, x2, d1, d2, scale_reproj, weight_sampson):
             float(scale_reproj), float(weight_sampson))
 
 
+def _cuda_run(problem, data, num_points, max_error, batch, **kwargs):
+    # the GPU kernels keep per-point columns and per-problem constants in
+    # separate arguments, so the two hybrid weights travel in `params`
+    estimator = get_cuda_estimator(problem, batch)
+    params = np.array([data[6], data[7]])
+    model, _, num_inliers, iterations = estimator.estimate(
+        data[:6], num_points, max_error, params=params, **kwargs)
+    return estimator, model, num_inliers, iterations
+
+
+# the RANSAC-internal local optimization and the final polish are the same
+# argument list every time; keeping it here stops the three entry points from
+# drifting apart
+def _ransac_kwargs(iterations, min_iterations, success_prob, lo_iterations,
+                   seed):
+    return dict(iterations=iterations, min_iterations=min_iterations,
+                success_prob=success_prob, lo_iterations=lo_iterations,
+                seed=seed)
+
+
 def _check_inputs(x1, x2, d1, d2):
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
@@ -126,7 +147,7 @@ def estimate_relative_pose_with_monodepth(
         weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
         final_refinement_iterations=100, final_loss='cauchy',
-        num_threads=None, batch_per_thread=None):
+        num_threads=None, batch_per_thread=None, device='cpu', batch=None):
     # params:
     # x1, x2 - (n, 2) arrays of *calibrated* image points
     # d1, d2 - (n,) monocular depths per image (scale-invariant, or
@@ -168,6 +189,7 @@ def estimate_relative_pose_with_monodepth(
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
     solver_cls = MonoDepthShiftSolver if estimate_shift else MonoDepthP3PSolver
     check_min_points(len(x1), solver_cls.sample_size)
+    check_device(device)
     loss = get_loss(final_loss)
     x1, x2, max_error, max_reproj_error = unproject_pair(
         camera1, camera2, x1, x2, max_error, max_reproj_error)
@@ -176,12 +198,18 @@ def estimate_relative_pose_with_monodepth(
                            weight_sampson)
 
     kind = 'calibrated-shift' if estimate_shift else 'calibrated'
-    estimator = _get_estimator(kind)
-    model, _, num_inliers, ransac_iterations = estimator.estimate(
-        data, len(x1), max_error, iterations=iterations,
-        min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed,
-        num_threads=num_threads, batch_per_thread=batch_per_thread)
+    common = _ransac_kwargs(iterations, min_iterations, success_prob,
+                            lo_iterations, seed)
+    cuda_estimator = None
+    if device == 'cuda':
+        cuda_estimator, model, num_inliers, ransac_iterations = _cuda_run(
+            'monodepth-shift' if estimate_shift else 'monodepth', data,
+            len(x1), max_error, batch, **common)
+    else:
+        estimator = _get_estimator(kind)
+        model, _, num_inliers, ransac_iterations = estimator.estimate(
+            data, len(x1), max_error, num_threads=num_threads,
+            batch_per_thread=batch_per_thread, **common)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3), 'scale': 1.0,
@@ -203,15 +231,22 @@ def estimate_relative_pose_with_monodepth(
     if (final_refinement_iterations != 0
             and num_inliers > solver_cls.sample_size):
         final_refiner = _get_final_refiner(kind, loss)
-        inlier_data = _monodepth_data(
-            x1[inliers], x2[inliers], d1[inliers], d2[inliers],
-            _scale_reproj(max_error, max_reproj_error), weight_sampson)
-        refined_model = np.empty(15)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
-                                num_final_iterations):
+        if cuda_estimator is not None:
+            # on device, through the same LM kernel built for `final_loss`
+            refined_model = cuda_estimator.final_refine(
+                model, max_error ** 2, num_final_iterations, loss)
+            ok = refined_model is not None
+        else:
+            inlier_data = _monodepth_data(
+                x1[inliers], x2[inliers], d1[inliers], d2[inliers],
+                _scale_reproj(max_error, max_reproj_error), weight_sampson)
+            refined_model = np.empty(15)
+            ok = final_refiner.refine(inlier_data, model, refined_model,
+                                      max_error ** 2, num_final_iterations)
+        if ok:
             R_c = refined_model[:9].reshape(3, 3).copy()
             t_c = refined_model[9:12].copy()
             scale_c = float(refined_model[12])
@@ -234,7 +269,7 @@ def estimate_shared_focal_relative_pose_with_monodepth(
         weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
         final_refinement_iterations=100, final_loss='cauchy',
-        num_threads=None, batch_per_thread=None):
+        num_threads=None, batch_per_thread=None, device='cpu', batch=None):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length
     # shared by both cameras; principal_point* optional (cx, cy), zero if
     # omitted. Thresholds in pixels. final_refinement_iterations is the LM
@@ -258,6 +293,7 @@ def estimate_shared_focal_relative_pose_with_monodepth(
     # f=scale=1.0 and info['num_inliers'] is 0.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
     check_min_points(len(x1), MonoDepthSharedFocalSolver.sample_size)
+    check_device(device)
     loss = get_loss(final_loss)
     x1c = x1 - _principal_point(principal_point1)
     x2c = x2 - _principal_point(principal_point2)
@@ -265,12 +301,18 @@ def estimate_shared_focal_relative_pose_with_monodepth(
                            _scale_reproj(max_error, max_reproj_error),
                            weight_sampson)
 
-    estimator = _get_estimator('shared-focal')
-    model, _, num_inliers, ransac_iterations = estimator.estimate(
-        data, len(x1), max_error, iterations=iterations,
-        min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed,
-        num_threads=num_threads, batch_per_thread=batch_per_thread)
+    common = _ransac_kwargs(iterations, min_iterations, success_prob,
+                            lo_iterations, seed)
+    cuda_estimator = None
+    if device == 'cuda':
+        cuda_estimator, model, num_inliers, ransac_iterations = _cuda_run(
+            'monodepth-shared-focal', data, len(x1), max_error, batch,
+            **common)
+    else:
+        estimator = _get_estimator('shared-focal')
+        model, _, num_inliers, ransac_iterations = estimator.estimate(
+            data, len(x1), max_error, num_threads=num_threads,
+            batch_per_thread=batch_per_thread, **common)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3), 'f': 1.0, 'scale': 1.0},
@@ -290,15 +332,21 @@ def estimate_shared_focal_relative_pose_with_monodepth(
     if (final_refinement_iterations != 0
             and num_inliers > MonoDepthSharedFocalSolver.sample_size):
         final_refiner = _get_final_refiner('shared-focal', loss)
-        inlier_data = _monodepth_data(
-            x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
-            _scale_reproj(max_error, max_reproj_error), weight_sampson)
-        refined_model = np.empty(15)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
-                                num_final_iterations):
+        if cuda_estimator is not None:
+            refined_model = cuda_estimator.final_refine(
+                model, max_error ** 2, num_final_iterations, loss)
+            ok = refined_model is not None
+        else:
+            inlier_data = _monodepth_data(
+                x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
+                _scale_reproj(max_error, max_reproj_error), weight_sampson)
+            refined_model = np.empty(15)
+            ok = final_refiner.refine(inlier_data, model, refined_model,
+                                      max_error ** 2, num_final_iterations)
+        if ok:
             R_c = refined_model[:9].reshape(3, 3).copy()
             t_c = refined_model[9:12].copy()
             f_c = float(refined_model[12])
@@ -319,7 +367,7 @@ def estimate_varying_focal_relative_pose_with_monodepth(
         weight_sampson=1.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
         final_refinement_iterations=100, final_loss='cauchy',
-        num_threads=None, batch_per_thread=None):
+        num_threads=None, batch_per_thread=None, device='cpu', batch=None):
     # x1, x2 in pixel coordinates, one unknown square-pixel focal length per
     # camera; principal_point* optional (cx, cy), zero if omitted.
     # Thresholds in pixels. final_refinement_iterations is the LM step
@@ -343,6 +391,7 @@ def estimate_varying_focal_relative_pose_with_monodepth(
     # f1=f2=scale=1.0 and info['num_inliers'] is 0.
     x1, x2, d1, d2 = _check_inputs(x1, x2, d1, d2)
     check_min_points(len(x1), MonoDepthVaryingFocalSolver.sample_size)
+    check_device(device)
     loss = get_loss(final_loss)
     x1c = x1 - _principal_point(principal_point1)
     x2c = x2 - _principal_point(principal_point2)
@@ -350,12 +399,18 @@ def estimate_varying_focal_relative_pose_with_monodepth(
                            _scale_reproj(max_error, max_reproj_error),
                            weight_sampson)
 
-    estimator = _get_estimator('varying-focal')
-    model, _, num_inliers, ransac_iterations = estimator.estimate(
-        data, len(x1), max_error, iterations=iterations,
-        min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed,
-        num_threads=num_threads, batch_per_thread=batch_per_thread)
+    common = _ransac_kwargs(iterations, min_iterations, success_prob,
+                            lo_iterations, seed)
+    cuda_estimator = None
+    if device == 'cuda':
+        cuda_estimator, model, num_inliers, ransac_iterations = _cuda_run(
+            'monodepth-varying-focal', data, len(x1), max_error, batch,
+            **common)
+    else:
+        estimator = _get_estimator('varying-focal')
+        model, _, num_inliers, ransac_iterations = estimator.estimate(
+            data, len(x1), max_error, num_threads=num_threads,
+            batch_per_thread=batch_per_thread, **common)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3), 'f1': 1.0, 'f2': 1.0,
@@ -377,15 +432,21 @@ def estimate_varying_focal_relative_pose_with_monodepth(
     if (final_refinement_iterations != 0
             and num_inliers > MonoDepthVaryingFocalSolver.sample_size):
         final_refiner = _get_final_refiner('varying-focal', loss)
-        inlier_data = _monodepth_data(
-            x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
-            _scale_reproj(max_error, max_reproj_error), weight_sampson)
-        refined_model = np.empty(15)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined_model, max_error ** 2,
-                                num_final_iterations):
+        if cuda_estimator is not None:
+            refined_model = cuda_estimator.final_refine(
+                model, max_error ** 2, num_final_iterations, loss)
+            ok = refined_model is not None
+        else:
+            inlier_data = _monodepth_data(
+                x1c[inliers], x2c[inliers], d1[inliers], d2[inliers],
+                _scale_reproj(max_error, max_reproj_error), weight_sampson)
+            refined_model = np.empty(15)
+            ok = final_refiner.refine(inlier_data, model, refined_model,
+                                      max_error ** 2, num_final_iterations)
+        if ok:
             R_c = refined_model[:9].reshape(3, 3).copy()
             t_c = refined_model[9:12].copy()
             f1_c = float(refined_model[12])

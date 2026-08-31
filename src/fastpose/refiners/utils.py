@@ -19,8 +19,9 @@ subset the way poselib's `refine_model` does (see `LO_INLIER_SCALE`).
 import math
 
 import numpy as np
-from numba import njit
+from numba import float64, njit
 
+from fastpose.jit_backend import cpu_jit
 from fastpose.kernel_cache import stabilize
 from fastpose.refiners.losses import TruncatedLoss
 from fastpose.scorers.sampson import (MIN_DEPTH, cheirality_ok,
@@ -41,162 +42,405 @@ STATE_SIZE = 19
 LO_INLIER_SCALE = 5.0
 
 
-@njit(cache=True, inline='always')
-def mat3_mul(A, B, C):
-    # C = A @ B for 3x3 matrices
-    for i in range(3):
+# ---------------------------------------------------------------------------
+# primitives shared with the CUDA refiner
+#
+# `fastpose/cuda/refiners.py` runs the same LM on the GPU, but as a block
+# reduction rather than a serial loop, so it cannot reuse the accumulate
+# kernel below. It must agree with it term for term, which is what building
+# the retraction, the tangent basis and the per-point Sampson jacobian from
+# one factory guarantees. See fastpose/jit_backend.py for the `jit` shim.
+#
+# `essential_tangent_rows_core` takes its two basis vectors as arguments
+# because `np.empty` does not compile in device code; the CPU wrapper below
+# restores the original three-argument signature.
+# ---------------------------------------------------------------------------
+
+def build_refiner_primitives(jit, real=float64):
+    # `real` types the float literals in `sampson_point_jacobian`, the only
+    # kernel here that runs per point and so the only one the CUDA refiner
+    # builds in float32; see build_sampson_point_kernels for why a bare
+    # literal would silently promote the expression back to float64. The
+    # retraction and tangent-basis kernels are O(1) per LM step and stay
+    # float64 regardless.
+    @jit(inline=True)
+    def mat3_mul(A, B, C):
+        # C = A @ B for 3x3 matrices
+        for i in range(3):
+            for j in range(3):
+                C[i, j] = (A[i, 0] * B[0, j] + A[i, 1] * B[1, j]
+                           + A[i, 2] * B[2, j])
+
+    @jit(inline=True)
+    def rodrigues(w0, w1, w2, R):
+        # R = exp([w]_x) via the Rodrigues formula, Taylor expansion near zero
+        theta_sq = w0 * w0 + w1 * w1 + w2 * w2
+        theta = math.sqrt(theta_sq)
+        if theta < 1e-9:
+            a = 1.0 - theta_sq / 6.0
+            b = 0.5 - theta_sq / 24.0
+        else:
+            a = math.sin(theta) / theta
+            b = (1.0 - math.cos(theta)) / theta_sq
+        R[0, 0] = 1.0 - b * (w1 * w1 + w2 * w2)
+        R[0, 1] = -a * w2 + b * w0 * w1
+        R[0, 2] = a * w1 + b * w0 * w2
+        R[1, 0] = a * w2 + b * w0 * w1
+        R[1, 1] = 1.0 - b * (w0 * w0 + w2 * w2)
+        R[1, 2] = -a * w0 + b * w1 * w2
+        R[2, 0] = -a * w1 + b * w0 * w2
+        R[2, 1] = a * w0 + b * w1 * w2
+        R[2, 2] = 1.0 - b * (w0 * w0 + w1 * w1)
+
+    @jit()
+    def tangent_basis(t, b1, b2):
+        # orthonormal basis (b1, b2) of the plane orthogonal to the unit
+        # vector t; deterministic in t so the jacobian and the retraction
+        # always agree
+        a0 = abs(t[0])
+        a1 = abs(t[1])
+        a2 = abs(t[2])
+        # b1 = t x e_k for the axis e_k of the smallest |component|
+        if a0 <= a1 and a0 <= a2:
+            b1[0] = 0.0
+            b1[1] = t[2]
+            b1[2] = -t[1]
+        elif a1 <= a2:
+            b1[0] = -t[2]
+            b1[1] = 0.0
+            b1[2] = t[0]
+        else:
+            b1[0] = t[1]
+            b1[1] = -t[0]
+            b1[2] = 0.0
+        inv = 1.0 / math.sqrt(b1[0] * b1[0] + b1[1] * b1[1] + b1[2] * b1[2])
+        b1[0] *= inv
+        b1[1] *= inv
+        b1[2] *= inv
+        b2[0] = t[1] * b1[2] - t[2] * b1[1]
+        b2[1] = t[2] * b1[0] - t[0] * b1[2]
+        b2[2] = t[0] * b1[1] - t[1] * b1[0]
+
+    @jit()
+    def essential_tangent_rows_core(pose, e, B, b1, b2):
+        # rows 0..4 of B: dE/dtheta as flat 9-vectors for the 5 tangent
+        # parameters of E = [t]_x R with t on the unit sphere, given the pose
+        # [R (row-major 3x3) | t] and its flat E.
+        #
+        # rows 0..2 (rotation, retraction R exp([w]_x)): dE/dw_k = E skew(e_k),
+        # plain column shuffles of E
+        for i in range(3):
+            e0 = e[3 * i]
+            e1 = e[3 * i + 1]
+            e2 = e[3 * i + 2]
+            B[0, 3 * i] = 0.0
+            B[0, 3 * i + 1] = e2
+            B[0, 3 * i + 2] = -e1
+            B[1, 3 * i] = -e2
+            B[1, 3 * i + 1] = 0.0
+            B[1, 3 * i + 2] = e0
+            B[2, 3 * i] = e1
+            B[2, 3 * i + 1] = -e0
+            B[2, 3 * i + 2] = 0.0
+
+        # rows 3..4 (translation): dE/dalpha_i = [b_i]_x R, since dt/dalpha_i
+        # is b_i on the unit sphere (b_i is orthogonal to t, so the
+        # renormalization in the retraction is second order)
+        tangent_basis(pose[9:12], b1, b2)
         for j in range(3):
-            C[i, j] = A[i, 0] * B[0, j] + A[i, 1] * B[1, j] + A[i, 2] * B[2, j]
+            r0 = pose[j]
+            r1 = pose[3 + j]
+            r2 = pose[6 + j]
+            B[3, j] = -b1[2] * r1 + b1[1] * r2
+            B[3, 3 + j] = b1[2] * r0 - b1[0] * r2
+            B[3, 6 + j] = -b1[1] * r0 + b1[0] * r1
+            B[4, j] = -b2[2] * r1 + b2[1] * r2
+            B[4, 3 + j] = b2[2] * r0 - b2[0] * r2
+            B[4, 6 + j] = -b2[1] * r0 + b2[0] * r1
+
+    @jit()
+    def log_focal_tangent_rows(f, pp1x, pp1y, pp2x, pp2y, row1, row2):
+        # dF/dlog(f1) and dF/dlog(f2) of F = K2^-T E K1^-1, as flat 9-vectors.
+        #
+        # f1 enters only through K1^-1, which multiplies F from the right and so
+        # acts on its columns; f2 only through K2^-T, which multiplies from the
+        # left and acts on its rows. In both cases the derivative of the 1/f
+        # entries w.r.t. log f is just -(1/f), which folds the whole thing back
+        # into F itself - no E, no focal, and nothing to differentiate
+        # numerically:
+        #     dF/dlog f1: columns 0, 1 -> -F, column 2 -> pp1 . (F col0, F col1)
+        #     dF/dlog f2: rows    0, 1 -> -F, row    2 -> pp2 . (F row0, F row1)
+        for i in range(3):
+            c0 = f[3 * i]
+            c1 = f[3 * i + 1]
+            row1[3 * i] = -c0
+            row1[3 * i + 1] = -c1
+            row1[3 * i + 2] = pp1x * c0 + pp1y * c1
+        for j in range(3):
+            r0 = f[j]
+            r1 = f[3 + j]
+            row2[j] = -r0
+            row2[3 + j] = -r1
+            row2[6 + j] = pp2x * r0 + pp2y * r1
+
+    @jit()
+    def svd3(A, V, s):
+        # one-sided Jacobi SVD of the 3x3 `A`, in place: on exit A holds U,
+        # V is orthogonal and s the singular values in descending order, with
+        # the input equal to U diag(s) V^T.
+        #
+        # This exists because `np.linalg.svd` is host-only - numba's LAPACK
+        # binding does not compile for CUDA - and the fundamental refiner is
+        # the one refiner whose state is an SVD factorization. One-sided
+        # Jacobi is the right choice at this size: it is ~40 lines, needs no
+        # bidiagonalization, and its relative accuracy on a 3x3 is at least
+        # LAPACK's. Deliberately not fastmath - the sweep's convergence test
+        # and the tiny-pivot guards need honest comparisons.
+        #
+        # The columns of A are rotated pairwise until they are orthogonal;
+        # the accumulated rotations are V, and each column's norm is a
+        # singular value.
+        for i in range(3):
+            for j in range(3):
+                V[i, j] = 1.0 if i == j else 0.0
+
+        fro = 0.0
+        for i in range(3):
+            for j in range(3):
+                fro += A[i, j] * A[i, j]
+        # squared off-diagonal tolerance; below this the columns are
+        # orthogonal to working precision
+        tol = 1e-30 * fro if fro > 0.0 else 0.0
+
+        for _ in range(30):
+            off = 0.0
+            for p in range(2):
+                for q in range(p + 1, 3):
+                    alpha = 0.0
+                    beta = 0.0
+                    gamma = 0.0
+                    for i in range(3):
+                        alpha += A[i, p] * A[i, p]
+                        beta += A[i, q] * A[i, q]
+                        gamma += A[i, p] * A[i, q]
+                    off += gamma * gamma
+                    if gamma == 0.0:
+                        continue
+                    # Givens rotation zeroing the (p, q) column inner product
+                    zeta = (beta - alpha) / (2.0 * gamma)
+                    t = math.copysign(
+                        1.0 / (abs(zeta) + math.sqrt(1.0 + zeta * zeta)), zeta)
+                    c = 1.0 / math.sqrt(1.0 + t * t)
+                    sn = c * t
+                    for i in range(3):
+                        ap = A[i, p]
+                        aq = A[i, q]
+                        A[i, p] = c * ap - sn * aq
+                        A[i, q] = sn * ap + c * aq
+                        vp = V[i, p]
+                        vq = V[i, q]
+                        V[i, p] = c * vp - sn * vq
+                        V[i, q] = sn * vp + c * vq
+            if off <= tol:
+                break
+
+        for j in range(3):
+            n = math.sqrt(A[0, j] * A[0, j] + A[1, j] * A[1, j]
+                          + A[2, j] * A[2, j])
+            s[j] = n
+
+        # selection sort into descending order, swapping the matching columns
+        for j in range(2):
+            best = j
+            for k in range(j + 1, 3):
+                if s[k] > s[best]:
+                    best = k
+            if best != j:
+                tmp = s[j]
+                s[j] = s[best]
+                s[best] = tmp
+                for i in range(3):
+                    tmp = A[i, j]
+                    A[i, j] = A[i, best]
+                    A[i, best] = tmp
+                    tmp = V[i, j]
+                    V[i, j] = V[i, best]
+                    V[i, best] = tmp
+
+        for j in range(2):
+            if s[j] > 0.0:
+                inv = 1.0 / s[j]
+                for i in range(3):
+                    A[i, j] *= inv
+        if s[2] > 1e-15 * s[0]:
+            inv = 1.0 / s[2]
+            for i in range(3):
+                A[i, 2] *= inv
+        else:
+            # a numerically rank-deficient third column carries no direction -
+            # which is exactly the rank-2 case the fundamental refiner starts
+            # from - so fix it from the other two instead of amplifying noise.
+            # It contributes s[2] ~ 0 to the reconstruction either way.
+            A[0, 2] = A[1, 0] * A[2, 1] - A[2, 0] * A[1, 1]
+            A[1, 2] = A[2, 0] * A[0, 1] - A[0, 0] * A[2, 1]
+            A[2, 2] = A[0, 0] * A[1, 1] - A[1, 0] * A[0, 1]
+
+    @jit()
+    def svd_init_state_core(model, state, A, V, s):
+        # decompose the flat model into the shared U/Vt/sigma state; sigma is
+        # the singular value ratio s1/s0 (rank-2 projection of the input
+        # model). Scratch is passed in pre-shaped so this compiles for CUDA.
+        for i in range(3):
+            for j in range(3):
+                v = model[3 * i + j]
+                # a non-finite entry is the only way this can fail, and an
+                # exception cannot propagate out of the parallel RANSAC driver
+                if not math.isfinite(v):
+                    return False
+                A[i, j] = v
+        svd3(A, V, s)
+        if s[1] <= 0.0:
+            return False
+        for i in range(3):
+            for j in range(3):
+                state[3 * i + j] = A[i, j]
+                state[9 + 3 * i + j] = V[j, i]
+        state[18] = s[1] / s[0]
+        return True
+
+    @jit(inline=True)
+    def factorized_f(U, Vt, sigma, f):
+        # F = U @ diag(1, sigma, 0) @ Vt, written into the flat 9-vector f
+        for i in range(3):
+            for j in range(3):
+                f[3 * i + j] = U[i, 0] * Vt[0, j] + sigma * U[i, 1] * Vt[1, j]
+
+    @jit()
+    def epipolar_jacobian_basis_core(U, Vt, sigma, B, S, SD, tmp):
+        # tangent basis of the factorization F = U diag(1, sigma, 0) Vt at the
+        # current state: B[k] = dF/dtheta_k as flat 9-vectors. Rows 0..2 are
+        # the left rotation, rows 3..5 the right rotation; if B has a 7th row
+        # it is the sigma derivative (fundamental matrix; on the essential
+        # manifold sigma is fixed at 1 and B has 6 rows). Scratch is passed in
+        # pre-shaped so this compiles for CUDA.
+        for k in range(3):
+            for i in range(3):
+                for j in range(3):
+                    S[i, j] = 0.0
+            if k == 0:
+                S[1, 2] = -1.0
+                S[2, 1] = 1.0
+            elif k == 1:
+                S[0, 2] = 1.0
+                S[2, 0] = -1.0
+            else:
+                S[0, 1] = -1.0
+                S[1, 0] = 1.0
+
+            # left rotation: dF/dw1_k = U @ (skew(e_k) @ D) @ Vt
+            for i in range(3):
+                SD[i, 0] = S[i, 0]
+                SD[i, 1] = sigma * S[i, 1]
+                SD[i, 2] = 0.0
+            mat3_mul(SD, Vt, tmp)
+            for i in range(3):
+                for j in range(3):
+                    B[k, 3 * i + j] = (U[i, 0] * tmp[0, j] + U[i, 1] * tmp[1, j]
+                                       + U[i, 2] * tmp[2, j])
+
+            # right rotation: dF/dw2_k = -U @ (D @ skew(e_k)) @ Vt
+            for j in range(3):
+                SD[0, j] = S[0, j]
+                SD[1, j] = sigma * S[1, j]
+                SD[2, j] = 0.0
+            mat3_mul(SD, Vt, tmp)
+            for i in range(3):
+                for j in range(3):
+                    B[3 + k, 3 * i + j] = -(U[i, 0] * tmp[0, j] + U[i, 1] * tmp[1, j]
+                                            + U[i, 2] * tmp[2, j])
+
+        if B.shape[0] > 6:
+            # sigma: dF/dsigma = u_1 v_1^T
+            for i in range(3):
+                for j in range(3):
+                    B[6, 3 * i + j] = U[i, 1] * Vt[1, j]
+
+    @jit(fastmath=True, inline=True)
+    def sampson_point_jacobian(f, x, y, xp, yp, dsdF):
+        # Sampson residual s_i = residual / sqrt(denominator) of one
+        # correspondence and its derivative ds_i/dF as a flat 9-vector.
+        # Returns (s_i, ok); ok is False for a degenerate (zero-denominator)
+        # model, where dsdF is left untouched and the caller drops the point.
+        fx1_0 = f[0] * x + f[1] * y + f[2]
+        fx1_1 = f[3] * x + f[4] * y + f[5]
+        fx1_2 = f[6] * x + f[7] * y + f[8]
+        ftx2_0 = f[0] * xp + f[3] * yp + f[6]
+        ftx2_1 = f[1] * xp + f[4] * yp + f[7]
+        residual = xp * fx1_0 + yp * fx1_1 + fx1_2
+        denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
+                       + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
+        if denominator <= 0.0:
+            return real(0.0), False
+
+        inv_sqrt_den = real(1.0) / math.sqrt(denominator)
+        s_i = residual * inv_sqrt_den
+        c = s_i / denominator
+        dsdF[0] = inv_sqrt_den * xp * x - c * (fx1_0 * x + xp * ftx2_0)
+        dsdF[1] = inv_sqrt_den * xp * y - c * (fx1_0 * y + xp * ftx2_1)
+        dsdF[2] = inv_sqrt_den * xp - c * fx1_0
+        dsdF[3] = inv_sqrt_den * yp * x - c * (fx1_1 * x + yp * ftx2_0)
+        dsdF[4] = inv_sqrt_den * yp * y - c * (fx1_1 * y + yp * ftx2_1)
+        dsdF[5] = inv_sqrt_den * yp - c * fx1_1
+        dsdF[6] = inv_sqrt_den * x - c * ftx2_0
+        dsdF[7] = inv_sqrt_den * y - c * ftx2_1
+        dsdF[8] = inv_sqrt_den
+        return s_i, True
+
+    return {
+        'mat3_mul': mat3_mul,
+        'rodrigues': rodrigues,
+        'tangent_basis': tangent_basis,
+        'essential_tangent_rows_core': essential_tangent_rows_core,
+        'log_focal_tangent_rows': log_focal_tangent_rows,
+        'svd3': svd3,
+        'svd_init_state_core': svd_init_state_core,
+        'factorized_f': factorized_f,
+        'epipolar_jacobian_basis_core': epipolar_jacobian_basis_core,
+        'sampson_point_jacobian': sampson_point_jacobian,
+    }
 
 
-@njit(cache=True, inline='always')
-def rodrigues(w0, w1, w2, R):
-    # R = exp([w]_x) via the Rodrigues formula, Taylor expansion near zero
-    theta_sq = w0 * w0 + w1 * w1 + w2 * w2
-    theta = math.sqrt(theta_sq)
-    if theta < 1e-9:
-        a = 1.0 - theta_sq / 6.0
-        b = 0.5 - theta_sq / 24.0
-    else:
-        a = math.sin(theta) / theta
-        b = (1.0 - math.cos(theta)) / theta_sq
-    R[0, 0] = 1.0 - b * (w1 * w1 + w2 * w2)
-    R[0, 1] = -a * w2 + b * w0 * w1
-    R[0, 2] = a * w1 + b * w0 * w2
-    R[1, 0] = a * w2 + b * w0 * w1
-    R[1, 1] = 1.0 - b * (w0 * w0 + w2 * w2)
-    R[1, 2] = -a * w0 + b * w1 * w2
-    R[2, 0] = -a * w1 + b * w0 * w2
-    R[2, 1] = a * w0 + b * w1 * w2
-    R[2, 2] = 1.0 - b * (w0 * w0 + w1 * w1)
-
-
-@njit(cache=True)
-def tangent_basis(t, b1, b2):
-    # orthonormal basis (b1, b2) of the plane orthogonal to the unit vector
-    # t; deterministic in t so the jacobian and the retraction always agree
-    a0 = abs(t[0])
-    a1 = abs(t[1])
-    a2 = abs(t[2])
-    # b1 = t x e_k for the axis e_k of the smallest |component|
-    if a0 <= a1 and a0 <= a2:
-        b1[0] = 0.0
-        b1[1] = t[2]
-        b1[2] = -t[1]
-    elif a1 <= a2:
-        b1[0] = -t[2]
-        b1[1] = 0.0
-        b1[2] = t[0]
-    else:
-        b1[0] = t[1]
-        b1[1] = -t[0]
-        b1[2] = 0.0
-    inv = 1.0 / math.sqrt(b1[0] * b1[0] + b1[1] * b1[1] + b1[2] * b1[2])
-    b1[0] *= inv
-    b1[1] *= inv
-    b1[2] *= inv
-    b2[0] = t[1] * b1[2] - t[2] * b1[1]
-    b2[1] = t[2] * b1[0] - t[0] * b1[2]
-    b2[2] = t[0] * b1[1] - t[1] * b1[0]
+_CPU_PRIM = build_refiner_primitives(cpu_jit)
+mat3_mul = _CPU_PRIM['mat3_mul']
+rodrigues = _CPU_PRIM['rodrigues']
+tangent_basis = _CPU_PRIM['tangent_basis']
+_essential_tangent_rows_core = _CPU_PRIM['essential_tangent_rows_core']
+log_focal_tangent_rows = _CPU_PRIM['log_focal_tangent_rows']
+svd3 = _CPU_PRIM['svd3']
+_svd_init_state_core = _CPU_PRIM['svd_init_state_core']
+factorized_f = _CPU_PRIM['factorized_f']
+_epipolar_jacobian_basis_core = _CPU_PRIM['epipolar_jacobian_basis_core']
+sampson_point_jacobian = _CPU_PRIM['sampson_point_jacobian']
 
 
 @njit(cache=True)
 def essential_tangent_rows(pose, e, B):
-    # rows 0..4 of B: dE/dtheta as flat 9-vectors for the 5 tangent
-    # parameters of E = [t]_x R with t on the unit sphere, given the pose
-    # [R (row-major 3x3) | t] and its flat E.
-    #
-    # rows 0..2 (rotation, retraction R exp([w]_x)): dE/dw_k = E skew(e_k),
-    # plain column shuffles of E
-    for i in range(3):
-        e0 = e[3 * i]
-        e1 = e[3 * i + 1]
-        e2 = e[3 * i + 2]
-        B[0, 3 * i] = 0.0
-        B[0, 3 * i + 1] = e2
-        B[0, 3 * i + 2] = -e1
-        B[1, 3 * i] = -e2
-        B[1, 3 * i + 1] = 0.0
-        B[1, 3 * i + 2] = e0
-        B[2, 3 * i] = e1
-        B[2, 3 * i + 1] = -e0
-        B[2, 3 * i + 2] = 0.0
-
-    # rows 3..4 (translation): dE/dalpha_i = [b_i]_x R, since dt/dalpha_i is
-    # b_i on the unit sphere (b_i is orthogonal to t, so the renormalization
-    # in the retraction is second order)
+    # CPU wrapper restoring the three-argument signature; the GPU kernel
+    # allocates b1/b2 as per-thread local arrays and calls the core directly
     b1 = np.empty(3)
     b2 = np.empty(3)
-    tangent_basis(pose[9:12], b1, b2)
-    for j in range(3):
-        r0 = pose[j]
-        r1 = pose[3 + j]
-        r2 = pose[6 + j]
-        B[3, j] = -b1[2] * r1 + b1[1] * r2
-        B[3, 3 + j] = b1[2] * r0 - b1[0] * r2
-        B[3, 6 + j] = -b1[1] * r0 + b1[0] * r1
-        B[4, j] = -b2[2] * r1 + b2[1] * r2
-        B[4, 3 + j] = b2[2] * r0 - b2[0] * r2
-        B[4, 6 + j] = -b2[1] * r0 + b2[0] * r1
-
-
-@njit(cache=True)
-def log_focal_tangent_rows(f, pp1x, pp1y, pp2x, pp2y, row1, row2):
-    # dF/dlog(f1) and dF/dlog(f2) of F = K2^-T E K1^-1, as flat 9-vectors.
-    #
-    # f1 enters only through K1^-1, which multiplies F from the right and so
-    # acts on its columns; f2 only through K2^-T, which multiplies from the
-    # left and acts on its rows. In both cases the derivative of the 1/f
-    # entries w.r.t. log f is just -(1/f), which folds the whole thing back
-    # into F itself - no E, no focal, and nothing to differentiate
-    # numerically:
-    #     dF/dlog f1: columns 0, 1 -> -F, column 2 -> pp1 . (F col0, F col1)
-    #     dF/dlog f2: rows    0, 1 -> -F, row    2 -> pp2 . (F row0, F row1)
-    for i in range(3):
-        c0 = f[3 * i]
-        c1 = f[3 * i + 1]
-        row1[3 * i] = -c0
-        row1[3 * i + 1] = -c1
-        row1[3 * i + 2] = pp1x * c0 + pp1y * c1
-    for j in range(3):
-        r0 = f[j]
-        r1 = f[3 + j]
-        row2[j] = -r0
-        row2[3 + j] = -r1
-        row2[6 + j] = pp2x * r0 + pp2y * r1
-
-
-@njit(cache=True, inline='always')
-def factorized_f(U, Vt, sigma, f):
-    # F = U @ diag(1, sigma, 0) @ Vt, written into the flat 9-vector f
-    for i in range(3):
-        for j in range(3):
-            f[3 * i + j] = U[i, 0] * Vt[0, j] + sigma * U[i, 1] * Vt[1, j]
+    _essential_tangent_rows_core(pose, e, B, b1, b2)
 
 
 @njit(cache=True)
 def svd_init_state(model, state):
-    # decompose the flat model into the shared U/Vt/sigma state; sigma is
-    # the singular value ratio s1/s0 (rank-2 projection of the input model)
-    M = np.empty((3, 3))
-    for i in range(3):
-        for j in range(3):
-            v = model[3 * i + j]
-            # LAPACK's only failure mode on a 3x3 is non-finite input, where
-            # np.linalg.svd raises - and an exception cannot propagate out of
-            # the parallel RANSAC driver (numba turns it into SystemError)
-            if not math.isfinite(v):
-                return False
-            M[i, j] = v
-    U, s, Vt = np.linalg.svd(M)
-    if s[1] <= 0.0:
-        return False
-    for i in range(3):
-        for j in range(3):
-            state[3 * i + j] = U[i, j]
-            state[9 + 3 * i + j] = Vt[i, j]
-    state[18] = s[1] / s[0]
-    return True
+    # CPU wrapper: allocates the scratch the shared core wants pre-shaped.
+    # The GPU refiner calls `svd_init_state_core` with per-thread local arrays
+    # instead, so both backends run the same one-sided Jacobi SVD.
+    A = np.empty((3, 3))
+    V = np.empty((3, 3))
+    s = np.empty(3)
+    return _svd_init_state_core(model, state, A, V, s)
 
 
 @njit(cache=True)
@@ -224,55 +468,12 @@ def apply_rotation_step(state, delta, state_new):
 
 @njit(cache=True)
 def epipolar_jacobian_basis(U, Vt, sigma, B):
-    # tangent basis of the factorization F = U diag(1, sigma, 0) Vt at the
-    # current state: B[k] = dF/dtheta_k as flat 9-vectors. Rows 0..2 are the
-    # left rotation, rows 3..5 the right rotation; if B has a 7th row it is
-    # the sigma derivative (fundamental matrix; on the essential manifold
-    # sigma is fixed at 1 and B has 6 rows).
+    # CPU wrapper: allocates the three 3x3 scratch matrices the shared core
+    # wants pre-shaped
     S = np.empty((3, 3))
     SD = np.empty((3, 3))
     tmp = np.empty((3, 3))
-    for k in range(3):
-        for i in range(3):
-            for j in range(3):
-                S[i, j] = 0.0
-        if k == 0:
-            S[1, 2] = -1.0
-            S[2, 1] = 1.0
-        elif k == 1:
-            S[0, 2] = 1.0
-            S[2, 0] = -1.0
-        else:
-            S[0, 1] = -1.0
-            S[1, 0] = 1.0
-
-        # left rotation: dF/dw1_k = U @ (skew(e_k) @ D) @ Vt
-        for i in range(3):
-            SD[i, 0] = S[i, 0]
-            SD[i, 1] = sigma * S[i, 1]
-            SD[i, 2] = 0.0
-        mat3_mul(SD, Vt, tmp)
-        for i in range(3):
-            for j in range(3):
-                B[k, 3 * i + j] = (U[i, 0] * tmp[0, j] + U[i, 1] * tmp[1, j]
-                                   + U[i, 2] * tmp[2, j])
-
-        # right rotation: dF/dw2_k = -U @ (D @ skew(e_k)) @ Vt
-        for j in range(3):
-            SD[0, j] = S[0, j]
-            SD[1, j] = sigma * S[1, j]
-            SD[2, j] = 0.0
-        mat3_mul(SD, Vt, tmp)
-        for i in range(3):
-            for j in range(3):
-                B[3 + k, 3 * i + j] = -(U[i, 0] * tmp[0, j] + U[i, 1] * tmp[1, j]
-                                        + U[i, 2] * tmp[2, j])
-
-    if B.shape[0] > 6:
-        # sigma: dF/dsigma = u_1 v_1^T
-        for i in range(3):
-            for j in range(3):
-                B[6, 3 * i + j] = U[i, 1] * Vt[1, j]
+    _epipolar_jacobian_basis_core(U, Vt, sigma, B, S, SD, tmp)
 
 
 def build_sampson_accumulate(loss):
@@ -305,35 +506,13 @@ def build_sampson_accumulate(loss):
             y = x1_y[i]
             xp = x2_x[i]
             yp = x2_y[i]
-            fx1_0 = f[0] * x + f[1] * y + f[2]
-            fx1_1 = f[3] * x + f[4] * y + f[5]
-            fx1_2 = f[6] * x + f[7] * y + f[8]
-            ftx2_0 = f[0] * xp + f[3] * yp + f[6]
-            ftx2_1 = f[1] * xp + f[4] * yp + f[7]
-            residual = xp * fx1_0 + yp * fx1_1 + fx1_2
-            denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
-                           + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
-            if denominator <= 0.0:
+            s_i, ok = sampson_point_jacobian(f, x, y, xp, yp, dsdF)
+            if not ok:
                 continue
-
-            # s_i = residual / sqrt(denominator); ds_i/dF as flat 9-vector
-            inv_sqrt_den = 1.0 / math.sqrt(denominator)
-            s_i = residual * inv_sqrt_den
             w = weight_fn(s_i * s_i, max_error_sq)
             if w <= 0.0:
                 continue
             num_residuals += 1
-
-            c = s_i / denominator
-            dsdF[0] = inv_sqrt_den * xp * x - c * (fx1_0 * x + xp * ftx2_0)
-            dsdF[1] = inv_sqrt_den * xp * y - c * (fx1_0 * y + xp * ftx2_1)
-            dsdF[2] = inv_sqrt_den * xp - c * fx1_0
-            dsdF[3] = inv_sqrt_den * yp * x - c * (fx1_1 * x + yp * ftx2_0)
-            dsdF[4] = inv_sqrt_den * yp * y - c * (fx1_1 * y + yp * ftx2_1)
-            dsdF[5] = inv_sqrt_den * yp - c * fx1_1
-            dsdF[6] = inv_sqrt_den * x - c * ftx2_0
-            dsdF[7] = inv_sqrt_den * y - c * ftx2_1
-            dsdF[8] = inv_sqrt_den
 
             for p in range(num_tangent):
                 acc = 0.0

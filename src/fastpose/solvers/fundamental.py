@@ -13,7 +13,8 @@ import math
 import numpy as np
 from numba import njit
 
-from fastpose.solvers.utils import fill_epipolar_matrix
+from fastpose.jit_backend import cpu_jit
+from fastpose.solvers.utils import build_fill_epipolar_matrix
 
 
 # ---------------------------------------------------------------------------
@@ -71,171 +72,209 @@ def seven_point(p, q):
 # numba kernels
 # ---------------------------------------------------------------------------
 
-@njit(cache=True, inline='always')
-def _det3_flat(f):
-    return (f[0] * (f[4] * f[8] - f[5] * f[7])
-            - f[1] * (f[3] * f[8] - f[5] * f[6])
-            + f[2] * (f[3] * f[7] - f[4] * f[6]))
+def build_seven_point_kernels(jit):
+    # one source, two backends: `cpu_jit` gives the njit kernels the RANSAC
+    # driver calls, `cuda_jit` the device functions the GPU solve kernel
+    # calls. `_solve_7pt_core` takes its scratch pre-shaped because numba's
+    # runtime is host-only - see solvers/p3p.py for the full note.
+    fill_epipolar_matrix = build_fill_epipolar_matrix(jit)
 
 
-@njit(cache=True, fastmath=True)
-def _solve_cubic_real(c3, c2, c1, c0, roots):
-    # real roots of c3*x^3 + c2*x^2 + c1*x + c0, closed form (no companion
-    # matrix eigendecomposition like np.roots)
-    scale = abs(c2) + abs(c1) + abs(c0)
-    if abs(c3) <= 1e-12 * scale or c3 == 0.0:
-        if abs(c2) <= 1e-12 * (abs(c1) + abs(c0)) or c2 == 0.0:
-            if c1 == 0.0:
+    @jit(inline=True)
+    def _det3_flat(f):
+        return (f[0] * (f[4] * f[8] - f[5] * f[7])
+                - f[1] * (f[3] * f[8] - f[5] * f[6])
+                + f[2] * (f[3] * f[7] - f[4] * f[6]))
+
+
+    @jit(fastmath=True)
+    def _solve_cubic_real(c3, c2, c1, c0, roots):
+        # real roots of c3*x^3 + c2*x^2 + c1*x + c0, closed form (no companion
+        # matrix eigendecomposition like np.roots)
+        scale = abs(c2) + abs(c1) + abs(c0)
+        if abs(c3) <= 1e-12 * scale or c3 == 0.0:
+            if abs(c2) <= 1e-12 * (abs(c1) + abs(c0)) or c2 == 0.0:
+                if c1 == 0.0:
+                    return 0
+                roots[0] = -c0 / c1
+                return 1
+            disc = c1 * c1 - 4.0 * c2 * c0
+            if disc < 0.0:
                 return 0
-            roots[0] = -c0 / c1
-            return 1
-        disc = c1 * c1 - 4.0 * c2 * c0
-        if disc < 0.0:
-            return 0
-        sq = math.sqrt(disc)
-        roots[0] = (-c1 + sq) / (2.0 * c2)
-        roots[1] = (-c1 - sq) / (2.0 * c2)
-        n_roots = 2
-    else:
-        a = c2 / c3
-        b = c1 / c3
-        c = c0 / c3
-        offset = a / 3.0
-        p = b - a * a / 3.0
-        q = 2.0 * a * a * a / 27.0 - a * b / 3.0 + c
-        disc = 0.25 * q * q + p * p * p / 27.0
-        if disc > 0.0:
             sq = math.sqrt(disc)
-            u = -0.5 * q + sq
-            v = -0.5 * q - sq
-            u = math.copysign(abs(u) ** (1.0 / 3.0), u)
-            v = math.copysign(abs(v) ** (1.0 / 3.0), v)
-            roots[0] = u + v - offset
-            n_roots = 1
-        elif p == 0.0:
-            roots[0] = -offset
-            n_roots = 1
+            roots[0] = (-c1 + sq) / (2.0 * c2)
+            roots[1] = (-c1 - sq) / (2.0 * c2)
+            n_roots = 2
         else:
-            r = 2.0 * math.sqrt(-p / 3.0)
-            arg = 3.0 * q / (p * r)
-            if arg > 1.0:
-                arg = 1.0
-            elif arg < -1.0:
-                arg = -1.0
-            phi = math.acos(arg) / 3.0
-            two_pi_3 = 2.0943951023931953
-            roots[0] = r * math.cos(phi) - offset
-            roots[1] = r * math.cos(phi - two_pi_3) - offset
-            roots[2] = r * math.cos(phi + two_pi_3) - offset
-            n_roots = 3
+            a = c2 / c3
+            b = c1 / c3
+            c = c0 / c3
+            offset = a / 3.0
+            p = b - a * a / 3.0
+            q = 2.0 * a * a * a / 27.0 - a * b / 3.0 + c
+            disc = 0.25 * q * q + p * p * p / 27.0
+            if disc > 0.0:
+                sq = math.sqrt(disc)
+                u = -0.5 * q + sq
+                v = -0.5 * q - sq
+                u = math.copysign(abs(u) ** (1.0 / 3.0), u)
+                v = math.copysign(abs(v) ** (1.0 / 3.0), v)
+                roots[0] = u + v - offset
+                n_roots = 1
+            elif p == 0.0:
+                roots[0] = -offset
+                n_roots = 1
+            else:
+                r = 2.0 * math.sqrt(-p / 3.0)
+                arg = 3.0 * q / (p * r)
+                if arg > 1.0:
+                    arg = 1.0
+                elif arg < -1.0:
+                    arg = -1.0
+                phi = math.acos(arg) / 3.0
+                two_pi_3 = 2.0943951023931953
+                roots[0] = r * math.cos(phi) - offset
+                roots[1] = r * math.cos(phi - two_pi_3) - offset
+                roots[2] = r * math.cos(phi + two_pi_3) - offset
+                n_roots = 3
 
-    # one Newton polish step per root for numerical accuracy
-    for i in range(n_roots):
-        x = roots[i]
-        fx = ((c3 * x + c2) * x + c1) * x + c0
-        dfx = (3.0 * c3 * x + 2.0 * c2) * x + c1
-        if dfx != 0.0:
-            roots[i] = x - fx / dfx
-    return n_roots
+        # one Newton polish step per root for numerical accuracy
+        for i in range(n_roots):
+            x = roots[i]
+            fx = ((c3 * x + c2) * x + c1) * x + c0
+            dfx = (3.0 * c3 * x + 2.0 * c2) * x + c1
+            if dfx != 0.0:
+                roots[i] = x - fx / dfx
+        return n_roots
 
 
-@njit(cache=True, fastmath=True)
-def _nullspace_7pt(A, f1, f2):
-    # two-dimensional nullspace of the 7x9 epipolar constraint matrix via
-    # Gaussian elimination with partial pivoting and back-substitution;
-    # much faster than a LAPACK SVD call for a matrix this small.
-    # Returns False for degenerate (rank-deficient) samples.
-    for col in range(7):
-        piv = col
-        max_val = abs(A[col, col])
-        for r in range(col + 1, 7):
-            v = abs(A[r, col])
-            if v > max_val:
-                max_val = v
-                piv = r
-        if max_val < 1e-12:
-            return False
-        if piv != col:
-            for c in range(col, 9):
-                t = A[col, c]
-                A[col, c] = A[piv, c]
-                A[piv, c] = t
-        inv = 1.0 / A[col, col]
-        for r in range(col + 1, 7):
-            factor = A[r, col] * inv
-            if factor != 0.0:
-                A[r, col] = 0.0
-                for c in range(col + 1, 9):
-                    A[r, c] -= factor * A[col, c]
+    @jit(fastmath=True)
+    def _nullspace_7pt(A, f1, f2):
+        # two-dimensional nullspace of the 7x9 epipolar constraint matrix via
+        # Gaussian elimination with partial pivoting and back-substitution;
+        # much faster than a LAPACK SVD call for a matrix this small.
+        # Returns False for degenerate (rank-deficient) samples.
+        for col in range(7):
+            piv = col
+            max_val = abs(A[col, col])
+            for r in range(col + 1, 7):
+                v = abs(A[r, col])
+                if v > max_val:
+                    max_val = v
+                    piv = r
+            if max_val < 1e-12:
+                return False
+            if piv != col:
+                for c in range(col, 9):
+                    t = A[col, c]
+                    A[col, c] = A[piv, c]
+                    A[piv, c] = t
+            inv = 1.0 / A[col, col]
+            for r in range(col + 1, 7):
+                factor = A[r, col] * inv
+                if factor != 0.0:
+                    A[r, col] = 0.0
+                    for c in range(col + 1, 9):
+                        A[r, c] -= factor * A[col, c]
 
-    # back-substitute with free variables (f7, f8) = (1, 0) and (0, 1)
-    for r in range(6, -1, -1):
-        s1 = A[r, 7]
-        s2 = A[r, 8]
-        for c in range(r + 1, 7):
-            s1 += A[r, c] * f1[c]
-            s2 += A[r, c] * f2[c]
-        inv = 1.0 / A[r, r]
-        f1[r] = -s1 * inv
-        f2[r] = -s2 * inv
-    f1[7] = 1.0
-    f1[8] = 0.0
-    f2[7] = 0.0
-    f2[8] = 1.0
+        # back-substitute with free variables (f7, f8) = (1, 0) and (0, 1)
+        for r in range(6, -1, -1):
+            s1 = A[r, 7]
+            s2 = A[r, 8]
+            for c in range(r + 1, 7):
+                s1 += A[r, c] * f1[c]
+                s2 += A[r, c] * f2[c]
+            inv = 1.0 / A[r, r]
+            f1[r] = -s1 * inv
+            f2[r] = -s2 * inv
+        f1[7] = 1.0
+        f1[8] = 0.0
+        f2[7] = 0.0
+        f2[8] = 1.0
 
-    # normalize for a well-conditioned determinant cubic
-    norm1 = 0.0
-    norm2 = 0.0
-    for j in range(9):
-        norm1 += f1[j] * f1[j]
-        norm2 += f2[j] * f2[j]
-    inv1 = 1.0 / math.sqrt(norm1)
-    inv2 = 1.0 / math.sqrt(norm2)
-    for j in range(9):
-        f1[j] *= inv1
-        f2[j] *= inv2
-    return True
+        # normalize for a well-conditioned determinant cubic
+        norm1 = 0.0
+        norm2 = 0.0
+        for j in range(9):
+            norm1 += f1[j] * f1[j]
+            norm2 += f2[j] * f2[j]
+        inv1 = 1.0 / math.sqrt(norm1)
+        inv2 = 1.0 / math.sqrt(norm2)
+        for j in range(9):
+            f1[j] *= inv1
+            f2[j] *= inv2
+        return True
+
+
+    @jit(fastmath=True)
+    def _solve_7pt_core(data, sample, models, A, f1, f2, tmp, roots):
+        # minimal 7-point solver; writes up to 3 models (flattened F) into
+        # `models` and returns their count. Scratch is passed in pre-shaped:
+        # see the note above the factory.
+        fill_epipolar_matrix(data, sample, A)
+
+        if not _nullspace_7pt(A, f1, f2):
+            return 0
+
+        # cubic det(alpha * F1 + (1 - alpha) * F2) = 0 via 4-point evaluation
+        value_1 = _det3_flat(f1)
+        value_0 = _det3_flat(f2)
+        for j in range(9):
+            tmp[j] = 2.0 * f2[j] - f1[j]
+        value_neg_1 = _det3_flat(tmp)
+        for j in range(9):
+            tmp[j] = 2.0 * f1[j] - f2[j]
+        value_2 = _det3_flat(tmp)
+
+        linear_plus_cubic = 0.5 * (value_1 - value_neg_1)
+        quadratic = 0.5 * (value_1 + value_neg_1 - 2.0 * value_0)
+        cubic = (value_2 - value_0 - 4.0 * quadratic - 2.0 * linear_plus_cubic) / 6.0
+        linear = linear_plus_cubic - cubic
+
+        n_roots = _solve_cubic_real(cubic, quadratic, linear, value_0, roots)
+
+        for r in range(n_roots):
+            alpha = roots[r]
+            beta = 1.0 - alpha
+            for j in range(9):
+                models[r, j] = alpha * f1[j] + beta * f2[j]
+
+        return n_roots
+
+
+
+    return {
+        'fill_epipolar_matrix': fill_epipolar_matrix,
+        'det3_flat': _det3_flat,
+        'solve_cubic_real': _solve_cubic_real,
+        'nullspace_7pt': _nullspace_7pt,
+        'solve_7pt_core': _solve_7pt_core,
+    }
+
+
+_CPU = build_seven_point_kernels(cpu_jit)
+
+# module-level names the tests import; these are the CPU kernels, byte-for-byte
+# the same source as before the factory
+_det3_flat = _CPU['det3_flat']
+_solve_cubic_real = _CPU['solve_cubic_real']
+_nullspace_7pt = _CPU['nullspace_7pt']
+_solve_7pt_core = _CPU['solve_7pt_core']
 
 
 @njit(cache=True, fastmath=True)
 def _solve_7pt(data, sample, models, workspace):
-    # minimal 7-point solver; writes up to 3 models (flattened F) into
-    # `models` and returns their count
+    # RANSAC-driver entry point: carves the flat workspace into the pre-shaped
+    # scratch `_solve_7pt_core` wants. CPU-only - `.reshape` does not compile
+    # for CUDA, where the kernel allocates the same pieces with
+    # `cuda.local.array` instead.
     A = workspace[0:63].reshape(7, 9)
     f1 = workspace[63:72]
     f2 = workspace[72:81]
     tmp = workspace[81:90]
     roots = workspace[90:93]
+    return _solve_7pt_core(data, sample, models, A, f1, f2, tmp, roots)
 
-    fill_epipolar_matrix(data, sample, A)
-
-    if not _nullspace_7pt(A, f1, f2):
-        return 0
-
-    # cubic det(alpha * F1 + (1 - alpha) * F2) = 0 via 4-point evaluation
-    value_1 = _det3_flat(f1)
-    value_0 = _det3_flat(f2)
-    for j in range(9):
-        tmp[j] = 2.0 * f2[j] - f1[j]
-    value_neg_1 = _det3_flat(tmp)
-    for j in range(9):
-        tmp[j] = 2.0 * f1[j] - f2[j]
-    value_2 = _det3_flat(tmp)
-
-    linear_plus_cubic = 0.5 * (value_1 - value_neg_1)
-    quadratic = 0.5 * (value_1 + value_neg_1 - 2.0 * value_0)
-    cubic = (value_2 - value_0 - 4.0 * quadratic - 2.0 * linear_plus_cubic) / 6.0
-    linear = linear_plus_cubic - cubic
-
-    n_roots = _solve_cubic_real(cubic, quadratic, linear, value_0, roots)
-
-    for r in range(n_roots):
-        alpha = roots[r]
-        beta = 1.0 - alpha
-        for j in range(9):
-            models[r, j] = alpha * f1[j] + beta * f2[j]
-
-    return n_roots
 
 
 # ---------------------------------------------------------------------------

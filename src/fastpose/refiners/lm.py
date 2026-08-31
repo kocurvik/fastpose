@@ -135,7 +135,12 @@ def build_lm_refine(init_state, state_to_model, accumulate, apply_step, cost,
                     state[k] = state_new[k]
                 for j in range(model_size):
                     f[j] = f_new[j]
-                lam = max(lam * 0.1, 1e-10)
+                # spelled out rather than `max(...)`: the builtin does not
+                # compile for CUDA on numba 0.67, and this loop's damping
+                # schedule is mirrored term for term by cuda/lm.py
+                lam = lam * 0.1
+                if lam < 1e-10:
+                    lam = 1e-10
                 recompute_jacobian = True
                 if step_sq < 1e-20:
                     break
