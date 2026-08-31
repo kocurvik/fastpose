@@ -31,8 +31,8 @@ in `cuda/refiners.py`, and most of `cuda/ransac.py`.
 
 ## 1. The four hard constraints
 
-These are properties of numba's CUDA target, verified on numba 0.65. The first
-three have no workaround.
+These are properties of numba's CUDA target, verified on numba 0.65 and 0.67.
+The first three have no workaround.
 
 ### 1.1 No `np.empty` and no `.reshape` in device code
 
@@ -75,6 +75,36 @@ raise.
 - Module-level numpy arrays read as constants inside device functions (e.g. `_T44`).
 - `math.isfinite`, `math.sqrt`, `math.copysign`. **Not** `np.inf` as a literal.
 - 2-D shared arrays, `float64`/`int64` reductions.
+
+### Version-sensitive: no `min`/`max` in device code on numba 0.67
+
+Builtin `min`/`max` compile on numba 0.65 and fail on 0.67 — in kernels as well
+as in device functions, for any argument count:
+
+```
+TypeError: Signature mismatch: 2 argument types given, but function takes 1 arguments
+```
+
+0.67 retyped both builtins through an `@overload` whose implementation is
+variadic (`def impl(*x)`). The CPU dispatcher folds varargs; the CUDA
+device-function dispatcher hands the raw argument tuple to `compile_device`, so
+a two-argument call compiles a one-parameter function with two argument types
+and dies in numba's `FixupArgs` pass. Spell the comparison out instead:
+
+```python
+abs_lo = abs(lo)
+lo_scale = abs_lo if abs_lo > 1.0 else 1.0    # not max(1.0, abs(lo))
+```
+
+This bites the **shared** sources hardest, and it bit the 5-point port: the call
+site sits in a solver that reads as CPU code, the CPU build lowers it fine, and
+the failure appears only on a machine with the newer numba — for us the cluster
+(numba 0.67, python 3.12) against a dev box on 0.65. So when a GPU compile fails
+where nothing reproduces locally, check the numba versions before anything else.
+
+`solvers/essential.py` is clear. `solvers/p4pf.py` (lines 110, 726) and
+`refiners/lm.py` (line 138) still call `max` — clear them as part of porting
+either one, per [§3.1](#31-step-1--refactor-the-solver-into-a-factory).
 
 ---
 
@@ -417,6 +447,7 @@ before trusting any tuning constant in this repo.
 ## 7. Checklist per problem
 
 - [ ] Solver refactored into a factory; CPU bodies verified unchanged; full CPU suite green
+- [ ] No `min`/`max` left in any factory-built source (numba 0.67 cannot compile them for CUDA)
 - [ ] CUDA solve kernel; **model counts match the CPU solver exactly**
 - [ ] Scorer reduction; inlier counts within 1, selection quality within 1e-5
 - [ ] LM kernel; shared-memory budget computed for this `NUM_TANGENT`; parity **and** minimizer-quality asserted
