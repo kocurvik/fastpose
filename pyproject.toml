@@ -15,7 +15,8 @@ authors = [
 dependencies = [
     "numba",
     "numpy",
-    "scipy"
+    "scipy",
+    "tqdm"
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

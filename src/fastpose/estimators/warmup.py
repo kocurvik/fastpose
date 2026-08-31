@@ -14,6 +14,7 @@ import argparse
 import time
 
 import numpy as np
+from tqdm import tqdm
 
 from fastpose.estimators.absolute import estimate_absolute_pose
 from fastpose.estimators.absolute_focal import estimate_absolute_pose_with_focal
@@ -103,14 +104,25 @@ def _synthetic_correspondences(num_points=32):
     return np.ascontiguousarray(x1), np.ascontiguousarray(x2)
 
 
-def warmup(problem="all", iterations=3, lo_iterations=1,
-           final_refinement_iterations=1):
-    x1, x2 = _synthetic_correspondences()
+def _warmup_steps(problem, iterations, lo_iterations,
+                  final_refinement_iterations):
+    """`(label, thunk)` pairs for the kernels `problem` selects, in run order.
 
-    if problem in ("all", "fundamental"):
+    Splitting the warmup into named steps is what lets the CLI show a progress
+    bar: the compile times are wildly uneven (the monodepth kernels dominate),
+    so a bar over the steps is the only feedback available while a single
+    `numba` compilation blocks for seconds.
+    """
+    x1, x2 = _synthetic_correspondences()
+    steps = []
+
+    def selected(name):
+        return problem in ("all", name)
+
+    if selected("fundamental"):
         pixel_x1 = x1 * 1000.0 + 500.0
         pixel_x2 = x2 * 1000.0 + 500.0
-        estimate_fundamental(
+        steps.append(("fundamental", lambda: estimate_fundamental(
             pixel_x1,
             pixel_x2,
             iterations=iterations,
@@ -118,10 +130,10 @@ def warmup(problem="all", iterations=3, lo_iterations=1,
             max_error=2.0,
             seed=0,
             lo_iterations=lo_iterations,
-        )
+        )))
 
-    if problem in ("all", "essential"):
-        estimate_relative_pose(
+    if selected("essential"):
+        steps.append(("essential", lambda: estimate_relative_pose(
             x1,
             x2,
             iterations=iterations,
@@ -129,13 +141,13 @@ def warmup(problem="all", iterations=3, lo_iterations=1,
             max_error=0.002,
             seed=0,
             lo_iterations=lo_iterations,
-        )
+        )))
 
-    if problem in ("all", "absolute"):
+    if selected("absolute"):
         rng = np.random.default_rng(0)
         depth = rng.uniform(3.0, 6.0, size=len(x1))
         world = np.column_stack([x1 * depth[:, None], depth])
-        estimate_absolute_pose(
+        steps.append(("absolute", lambda: estimate_absolute_pose(
             x1,
             world,
             iterations=iterations,
@@ -143,57 +155,60 @@ def warmup(problem="all", iterations=3, lo_iterations=1,
             max_error=0.002,
             seed=0,
             lo_iterations=lo_iterations,
-        )
+        )))
 
-    if problem in ("all", "absolute-focal"):
+    if selected("absolute-focal"):
         rng = np.random.default_rng(0)
         depth = rng.uniform(3.0, 6.0, size=len(x1))
         world = np.column_stack([x1 * depth[:, None], depth])
-        estimate_absolute_pose_with_focal(
-            x1 * 1000.0,
-            world,
-            iterations=iterations,
-            min_iterations=iterations,
-            max_error=2.0,
-            seed=0,
-            lo_iterations=lo_iterations,
-        )
+        steps.append(("absolute-focal",
+                      lambda: estimate_absolute_pose_with_focal(
+                          x1 * 1000.0,
+                          world,
+                          iterations=iterations,
+                          min_iterations=iterations,
+                          max_error=2.0,
+                          seed=0,
+                          lo_iterations=lo_iterations,
+                      )))
 
-    if problem in ("all", "varying-focal"):
+    if selected("varying-focal"):
         pp1 = np.array([500.0, 480.0])
         pp2 = np.array([620.0, 510.0])
         pixel_x1 = x1 * 800.0 + pp1
         pixel_x2 = x2 * 1300.0 + pp2
-        estimate_relative_pose_with_varying_focals(
-            pixel_x1,
-            pixel_x2,
-            pp1,
-            pp2,
-            iterations=iterations,
-            min_iterations=iterations,
-            max_error=2.0,
-            seed=0,
-            lo_iterations=lo_iterations,
-        )
+        steps.append(("varying-focal",
+                      lambda: estimate_relative_pose_with_varying_focals(
+                          pixel_x1,
+                          pixel_x2,
+                          pp1,
+                          pp2,
+                          iterations=iterations,
+                          min_iterations=iterations,
+                          max_error=2.0,
+                          seed=0,
+                          lo_iterations=lo_iterations,
+                      )))
 
-    if problem in ("all", "shared-focal"):
+    if selected("shared-focal"):
         pp1 = np.array([500.0, 480.0])
         pp2 = np.array([620.0, 510.0])
         pixel_x1 = x1 * 1000.0 + pp1
         pixel_x2 = x2 * 1000.0 + pp2
-        estimate_relative_pose_with_shared_focal(
-            pixel_x1,
-            pixel_x2,
-            pp1,
-            pp2,
-            iterations=iterations,
-            min_iterations=iterations,
-            max_error=2.0,
-            seed=0,
-            lo_iterations=lo_iterations,
-        )
+        steps.append(("shared-focal",
+                      lambda: estimate_relative_pose_with_shared_focal(
+                          pixel_x1,
+                          pixel_x2,
+                          pp1,
+                          pp2,
+                          iterations=iterations,
+                          min_iterations=iterations,
+                          max_error=2.0,
+                          seed=0,
+                          lo_iterations=lo_iterations,
+                      )))
 
-    if problem in ("all", "monodepth"):
+    if selected("monodepth"):
         rng = np.random.default_rng(0)
         depth1 = rng.uniform(3.0, 6.0, size=len(x1))
         world = np.column_stack([x1 * depth1[:, None], depth1])
@@ -209,47 +224,68 @@ def warmup(problem="all", iterations=3, lo_iterations=1,
         depth2 = (world @ R.T + t)[:, 2]
 
         for estimate_shift in (False, True):
-            estimate_relative_pose_with_monodepth(
-                x1,
-                x2,
-                depth1,
-                depth2,
-                estimate_shift=estimate_shift,
-                iterations=iterations,
-                min_iterations=iterations,
-                max_error=0.002,
-                seed=0,
-                lo_iterations=lo_iterations,
-                final_refinement_iterations=final_refinement_iterations,
-            )
-        estimate_shared_focal_relative_pose_with_monodepth(
-            x1 * 1000.0,
-            x2 * 1000.0,
-            depth1,
-            depth2,
-            iterations=iterations,
-            min_iterations=iterations,
-            max_error=2.0,
-            seed=0,
-            lo_iterations=lo_iterations,
-            final_refinement_iterations=final_refinement_iterations,
-        )
-        estimate_varying_focal_relative_pose_with_monodepth(
-            x1 * 1000.0,
-            x2 * 1000.0,
-            depth1,
-            depth2,
-            iterations=iterations,
-            min_iterations=iterations,
-            max_error=2.0,
-            seed=0,
-            lo_iterations=lo_iterations,
-            final_refinement_iterations=final_refinement_iterations,
-        )
+            label = "monodepth-shift" if estimate_shift else "monodepth"
+            steps.append((label,
+                          lambda estimate_shift=estimate_shift:
+                          estimate_relative_pose_with_monodepth(
+                              x1,
+                              x2,
+                              depth1,
+                              depth2,
+                              estimate_shift=estimate_shift,
+                              iterations=iterations,
+                              min_iterations=iterations,
+                              max_error=0.002,
+                              seed=0,
+                              lo_iterations=lo_iterations,
+                              final_refinement_iterations=final_refinement_iterations,
+                          )))
+        steps.append(("monodepth-shared-focal",
+                      lambda: estimate_shared_focal_relative_pose_with_monodepth(
+                          x1 * 1000.0,
+                          x2 * 1000.0,
+                          depth1,
+                          depth2,
+                          iterations=iterations,
+                          min_iterations=iterations,
+                          max_error=2.0,
+                          seed=0,
+                          lo_iterations=lo_iterations,
+                          final_refinement_iterations=final_refinement_iterations,
+                      )))
+        steps.append(("monodepth-varying-focal",
+                      lambda: estimate_varying_focal_relative_pose_with_monodepth(
+                          x1 * 1000.0,
+                          x2 * 1000.0,
+                          depth1,
+                          depth2,
+                          iterations=iterations,
+                          min_iterations=iterations,
+                          max_error=2.0,
+                          seed=0,
+                          lo_iterations=lo_iterations,
+                          final_refinement_iterations=final_refinement_iterations,
+                      )))
         # one LM kernel is compiled per `final_loss`, and the calls above only
         # reach the ones the RANSAC run happened to need
-        _warm_monodepth_final_refiners(x1, x2, depth1, depth2, R, t,
-                                       final_refinement_iterations)
+        steps.append(("monodepth-final-refiners",
+                      lambda: _warm_monodepth_final_refiners(
+                          x1, x2, depth1, depth2, R, t,
+                          final_refinement_iterations)))
+
+    return steps
+
+
+def warmup(problem="all", iterations=3, lo_iterations=1,
+           final_refinement_iterations=1, progress=False):
+    steps = _warmup_steps(problem, iterations, lo_iterations,
+                          final_refinement_iterations)
+    bar = tqdm(steps, desc="warming up", unit="kernel", disable=not progress)
+    for label, run in bar:
+        # before the call, not after: the postfix names the kernel currently
+        # compiling, which is where the bar sits for seconds at a time
+        bar.set_postfix_str(label)
+        run()
 
 
 def main(argv=None):
@@ -283,11 +319,16 @@ def main(argv=None):
         help="LM steps of the final polish pass to run during warmup; the "
              "pass is compiled per final_loss, so 0 leaves those kernels cold.",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Do not draw the progress bar.",
+    )
     args = parser.parse_args(argv)
 
     start = time.perf_counter()
     warmup(args.problem, args.iterations, args.lo_iterations,
-           args.final_refinement_iterations)
+           args.final_refinement_iterations, progress=not args.no_progress)
     elapsed = time.perf_counter() - start
     print(f"fastpose warmup complete in {elapsed:.2f}s")
     return 0
