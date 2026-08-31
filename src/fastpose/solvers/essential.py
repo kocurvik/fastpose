@@ -520,7 +520,15 @@ def build_five_point_kernels(jit):
                 roots[num_roots] = x
                 num_roots += 1
                 continue
-            if hi - lo < 1e-13 * max(1.0, abs(lo)):
+            # spelled out rather than `max(1.0, abs(lo))`: numba 0.67 types
+            # two-argument min/max through an `@overload` whose implementation
+            # is variadic, and the CUDA device-function dispatcher cannot fold
+            # varargs, so any min/max call fails to compile for the GPU
+            # ("Signature mismatch: 2 argument types given, but function takes
+            # 1 arguments"). Keep this file free of both builtins.
+            abs_lo = abs(lo)
+            lo_scale = abs_lo if abs_lo > 1.0 else 1.0
+            if hi - lo < 1e-13 * lo_scale:
                 # unresolvable cluster of roots; emit the midpoint once
                 roots[num_roots] = 0.5 * (lo + hi)
                 num_roots += 1
