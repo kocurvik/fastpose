@@ -9,7 +9,8 @@ benchmark).
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
+from fastpose.estimators.utils import (build_info, check_device, check_min_points,
+                                       failure_info, get_cuda_estimator,
                                        point_columns, unproject_pair)
 from fastpose.refiners.essential import LMEssentialRefiner
 from fastpose.refiners.losses import CauchyLoss
@@ -19,20 +20,6 @@ from fastpose.solvers.essential import FivePointSolver
 
 _default_estimator = None
 _final_refiner = None
-_cuda_estimators = {}
-
-
-def _get_cuda_estimator(batch):
-    # one estimator per batch size; it owns the device buffers, so reusing it
-    # across calls is what keeps repeated estimates from reallocating and
-    # recompiling
-    from fastpose import cuda as cuda_backend
-    from fastpose.cuda.ransac import DEFAULT_BATCH, CudaRansacEstimator
-    cuda_backend.require()
-    key = DEFAULT_BATCH if batch is None else int(batch)
-    if key not in _cuda_estimators:
-        _cuda_estimators[key] = CudaRansacEstimator(batch=key)
-    return _cuda_estimators[key]
 
 
 def _get_default_estimator():
@@ -105,14 +92,13 @@ def estimate_relative_pose(x1, x2, camera1=None, camera2=None, iterations=1000,
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
     check_min_points(len(x1), FivePointSolver.sample_size)
-    if device not in ('cpu', 'cuda'):
-        raise ValueError(f"device must be 'cpu' or 'cuda', got {device!r}")
+    check_device(device)
     x1, x2, max_error = unproject_pair(camera1, camera2, x1, x2, max_error)
     data = point_columns(x1, x2)
 
     cuda_estimator = None
     if device == 'cuda':
-        cuda_estimator = _get_cuda_estimator(batch)
+        cuda_estimator = get_cuda_estimator('essential', batch)
         model, _, num_inliers, ransac_iterations = cuda_estimator.estimate(
             data, len(x1), max_error, iterations=iterations,
             min_iterations=min_iterations, success_prob=success_prob,

@@ -13,23 +13,38 @@ iterations and many matches - and a loss on small problems, where a round of
 kernel launches (~30-60us) costs more than the few hundred microseconds the
 CPU driver would have needed in total.
 
+Layout
+------
+Everything that is not specific to one estimation problem is shared:
+
+    ransac.py     the batched driver - round loop, local-optimization gate,
+                  adaptive termination, packed readback
+    scoring.py    the block-reduction truncated (MSAC) scorer
+    lm.py         the whole LM loop inside one kernel launch
+    reductions.py the tree reductions and the damped Cholesky solve
+    problem.py    `CudaProblem`, the seam between the two
+    problems/     one module per estimation problem: the solve kernel's
+                  scratch, and the per-point device functions the scorer and
+                  the LM call
+
 What is shared with the CPU path and what is not
 ------------------------------------------------
 The minimal-solver math is *the same source*: `solvers/essential.py` builds
-its kernels through `build_five_point_kernels(jit)` and this package
+its kernels through `build_five_point_kernels(jit)` and `problems/essential.py`
 instantiates that factory with `cuda.jit(device=True)` instead of `njit`.
-There is no second copy of the Sturm/Danilevsky chain to keep in sync.
+There is no second copy of the Sturm/Danilevsky chain to keep in sync, and the
+same holds for every other problem.
 
 Two things could not be shared, both because numba's runtime is host-only, so
 neither `np.empty` nor `.reshape` compiles in device code:
 
 - scratch is passed in pre-shaped (see the note in `solvers/essential.py`);
-  the CUDA kernel allocates it with `cuda.local.array`, which the hardware
+  the CUDA kernels allocate it with `cuda.local.array`, which the hardware
   interleaves across threads, so the accesses coalesce for free.
 - the scorer and the LM accumulate are *reductions* here, not serial loops,
-  so they are written fresh in `cuda/scorers.py` and `cuda/refiners.py`
-  rather than re-decorated. They are checked against the CPU kernels
-  point-for-point in `tests/test_cuda.py`.
+  so their drivers are written fresh in `scoring.py` and `lm.py` rather than
+  re-decorated. They are checked against the CPU kernels point-for-point in
+  `tests/test_cuda.py`.
 
 Availability
 ------------

@@ -7,11 +7,19 @@ plain translation update (3). The reprojection jacobian is analytic:
 r = pi(R X + t) - x with pi the pinhole projection, dZ/dw = -R [X]_x and
 dZ/dt = I. Only the jacobian accumulation and the retraction are defined
 here - the LM loop itself lives in refiners/lm.py.
+
+`build_reprojection_primitives` is the shared-with-CUDA factory: the same
+source is compiled with `njit` for the accumulate below and with
+`cuda.jit(device=True)` for the block-reduction accumulate in
+`cuda/problems/absolute.py`, so there is only one copy of the jacobian. Its
+`focal` flag adds the log-focal column and the pixel scaling, which is what
+`refiners/absolute_focal.py` builds it with.
 """
 
 import numpy as np
-from numba import njit
+from numba import float64, njit
 
+from fastpose.jit_backend import cpu_jit
 from fastpose.refiners.lm import build_lm_refine
 from fastpose.refiners.losses import TruncatedLoss
 from fastpose.refiners.utils import mat3_mul, rodrigues
@@ -20,6 +28,72 @@ from fastpose.scorers.reprojection import build_reprojection_cost, reprojection_
 STATE_SIZE = 12
 MODEL_SIZE = 12
 NUM_TANGENT = 6  # 3 rotation + 3 translation
+
+
+def build_reprojection_primitives(jit, real=float64, focal=False):
+    # `real` types the float literals, so the CUDA refiner can build this in
+    # float32 without a bare `1.0` silently promoting the chain back to
+    # float64; see build_sampson_point_kernels for the full rationale.
+    # `focal` is a compile-time flag: it switches the residual to pixels
+    # (r = f pi(Z) - x) and appends the dr/dlog(f) column, giving the 7
+    # tangent parameters refiners/absolute_focal.py wants.
+    @jit(fastmath=True, inline=True)
+    def reprojection_point_jacobian(f, Xx, Xy, Xz, x, y, J0, J1):
+        # residuals (rx, ry) of one 2D-3D correspondence and the two rows of
+        # dr/dtheta, written into J0 and J1. Returns (rx, ry, ok); ok is
+        # False for a point behind the camera, where J0/J1 are left untouched
+        # and the caller drops the point.
+        zx = f[0] * Xx + f[1] * Xy + f[2] * Xz + f[9]
+        zy = f[3] * Xx + f[4] * Xy + f[5] * Xz + f[10]
+        zz = f[6] * Xx + f[7] * Xy + f[8] * Xz + f[11]
+        if zz <= real(0.0):
+            return real(0.0), real(0.0), False
+        inv = real(1.0) / zz
+        px = zx * inv
+        py = zy * inv
+        if focal:
+            fl = f[12]
+            rx = fl * px - x
+            ry = fl * py - y
+            # dr/dZ carries the focal in the pixel case
+            g = fl * inv
+        else:
+            rx = px - x
+            ry = py - y
+            g = inv
+
+        # A = dr/dZ @ R with dr/dZ = g * [[1, 0, -px], [0, 1, -py]]
+        a00 = g * (f[0] - px * f[6])
+        a01 = g * (f[1] - px * f[7])
+        a02 = g * (f[2] - px * f[8])
+        a10 = g * (f[3] - py * f[6])
+        a11 = g * (f[4] - py * f[7])
+        a12 = g * (f[5] - py * f[8])
+
+        # rotation columns dZ/dw_k = R (e_k x X); translation dZ/dt = I
+        J0[0] = -a01 * Xz + a02 * Xy
+        J0[1] = a00 * Xz - a02 * Xx
+        J0[2] = -a00 * Xy + a01 * Xx
+        J1[0] = -a11 * Xz + a12 * Xy
+        J1[1] = a10 * Xz - a12 * Xx
+        J1[2] = -a10 * Xy + a11 * Xx
+        J0[3] = g
+        J0[4] = real(0.0)
+        J0[5] = -px * g
+        J1[3] = real(0.0)
+        J1[4] = g
+        J1[5] = -py * g
+        if focal:
+            # focal column dr/dlog(fl) = fl * pi(Z)
+            J0[6] = fl * px
+            J1[6] = fl * py
+        return rx, ry, True
+
+    return {'reprojection_point_jacobian': reprojection_point_jacobian}
+
+
+_CPU_PRIM = build_reprojection_primitives(cpu_jit)
+reprojection_point_jacobian = _CPU_PRIM['reprojection_point_jacobian']
 
 
 @njit(cache=True)
@@ -66,46 +140,17 @@ def build_accumulate(loss):
 
         J0 = np.empty(NUM_TANGENT)
         J1 = np.empty(NUM_TANGENT)
-        A = np.empty((2, 3))
 
         num_residuals = 0
         for i in range(n):
-            Xx = X_x[i]
-            Xy = X_y[i]
-            Xz = X_z[i]
-            zx = f[0] * Xx + f[1] * Xy + f[2] * Xz + f[9]
-            zy = f[3] * Xx + f[4] * Xy + f[5] * Xz + f[10]
-            zz = f[6] * Xx + f[7] * Xy + f[8] * Xz + f[11]
-            if zz <= 0.0:
+            rx, ry, ok = reprojection_point_jacobian(
+                f, X_x[i], X_y[i], X_z[i], x_x[i], x_y[i], J0, J1)
+            if not ok:
                 continue
-            inv = 1.0 / zz
-            px = zx * inv
-            py = zy * inv
-            rx = px - x_x[i]
-            ry = py - x_y[i]
             w = weight_fn(rx * rx + ry * ry, max_error_sq)
             if w <= 0.0:
                 continue
             num_residuals += 2
-
-            # A = dr/dZ @ R with dr/dZ = [[1, 0, -px], [0, 1, -py]] / zz
-            for j in range(3):
-                A[0, j] = inv * (f[j] - px * f[6 + j])
-                A[1, j] = inv * (f[3 + j] - py * f[6 + j])
-
-            # rotation columns dZ/dw_k = R (e_k x X); translation dZ/dt = I
-            J0[0] = -A[0, 1] * Xz + A[0, 2] * Xy
-            J0[1] = A[0, 0] * Xz - A[0, 2] * Xx
-            J0[2] = -A[0, 0] * Xy + A[0, 1] * Xx
-            J1[0] = -A[1, 1] * Xz + A[1, 2] * Xy
-            J1[1] = A[1, 0] * Xz - A[1, 2] * Xx
-            J1[2] = -A[1, 0] * Xy + A[1, 1] * Xx
-            J0[3] = inv
-            J0[4] = 0.0
-            J0[5] = -px * inv
-            J1[3] = 0.0
-            J1[4] = inv
-            J1[5] = -py * inv
 
             for p in range(NUM_TANGENT):
                 Jtr[p] += w * (J0[p] * rx + J1[p] * ry)

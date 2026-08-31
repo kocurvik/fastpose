@@ -5,6 +5,33 @@ import math
 import numpy as np
 
 
+_cuda_estimators = {}
+
+
+def check_device(device):
+    # every estimator entry point takes the same `device` argument; an
+    # unknown value must fail with something actionable rather than silently
+    # running on the CPU
+    if device not in ('cpu', 'cuda'):
+        raise ValueError(f"device must be 'cpu' or 'cuda', got {device!r}")
+
+
+def get_cuda_estimator(problem_name, batch):
+    # one estimator per (problem, batch size); it owns the device buffers, so
+    # reusing it across calls is what keeps repeated estimates from
+    # reallocating and re-warming. Imported here rather than at module scope
+    # so `import fastpose` never touches numba.cuda.
+    from fastpose import cuda as cuda_backend
+    from fastpose.cuda.ransac import DEFAULT_BATCH, CudaRansacEstimator
+    from fastpose.cuda.registry import get_problem
+    cuda_backend.require()
+    key = (problem_name, DEFAULT_BATCH if batch is None else int(batch))
+    if key not in _cuda_estimators:
+        _cuda_estimators[key] = CudaRansacEstimator(get_problem(problem_name),
+                                                    batch=key[1])
+    return _cuda_estimators[key]
+
+
 def check_min_points(n, min_points):
     # guards against calling a minimal solver with fewer correspondences than
     # its sample_size; raises early instead of letting the RANSAC driver draw

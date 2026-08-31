@@ -3,8 +3,9 @@
 import numpy as np
 
 from fastpose.estimators.ransac import RansacEstimator
-from fastpose.estimators.utils import (build_info, check_min_points, failure_info,
-                                       normalize_points)
+from fastpose.estimators.utils import (build_info, check_device,
+                                       check_min_points, failure_info,
+                                       get_cuda_estimator, normalize_points)
 from fastpose.refiners.losses import CauchyLoss
 from fastpose.refiners.shared_focal import LMSharedFocalPoseRefiner
 from fastpose.refiners.utils import LO_INLIER_SCALE
@@ -65,7 +66,7 @@ def estimate_relative_pose_with_shared_focal(
         iterations=1000, max_error=2.0, seed=4578, min_iterations=None,
         success_prob=0.9999, lo_iterations=25,
         final_refinement_iterations=100, num_threads=None,
-        batch_per_thread=None):
+        batch_per_thread=None, device='cpu', batch=None):
     # x1, x2 are image coordinates for two cameras with the same unknown
     # square-pixel focal length. principal_point* are optional (cx, cy); if
     # omitted, zero is assumed. final_refinement_iterations is the LM step
@@ -80,6 +81,14 @@ def estimate_relative_pose_with_shared_focal(
     #     leave it off when already running one process per core.
     # batch_per_thread - hypotheses per thread in a batch; None (default)
     #     uses ransac.DEFAULT_BATCH_PER_THREAD
+    # device - 'cpu' (default) runs the numba CPU drivers above; 'cuda' runs
+    #     the batch-parallel GPU driver (fastpose/cuda/ransac.py), which
+    #     solves, scores, locally optimizes and polishes on device, in the
+    #     same normalized frame. Ignores num_threads. The 6-point solve
+    #     kernel carries ~30.5 KB of per-thread local memory, several times
+    #     any other problem's, so its per-round floor is correspondingly
+    #     higher - see cuda/problems/shared_focal.py.
+    # batch - hypotheses per GPU round; None uses cuda.ransac.DEFAULT_BATCH
     # Returns (model, info) with model = {'R', 't', 'f'} and
     # info = {'inliers', 'num_inliers', 'model_score', 'iterations',
     # 'refinements'}; on total failure model holds the identity pose with
@@ -87,6 +96,7 @@ def estimate_relative_pose_with_shared_focal(
     x1 = np.ascontiguousarray(x1, dtype=np.float64)
     x2 = np.ascontiguousarray(x2, dtype=np.float64)
     check_min_points(len(x1), SixPointSharedFocalSolver.sample_size)
+    check_device(device)
     pp1 = _principal_point(principal_point1)
     pp2 = _principal_point(principal_point2)
 
@@ -97,12 +107,23 @@ def estimate_relative_pose_with_shared_focal(
                      scale * pp2[1] + T[1, 2]], dtype=np.float64)
     data = _data_tuple(x1n, x2n, pp1n, pp2n)
 
-    estimator = _get_default_estimator()
-    model, _, num_inliers, ransac_iterations = estimator.estimate(
-        data, len(x1), max_error * scale, iterations=iterations,
-        min_iterations=min_iterations, success_prob=success_prob,
-        lo_iterations=lo_iterations, seed=seed,
-        num_threads=num_threads, batch_per_thread=batch_per_thread)
+    cuda_estimator = None
+    if device == 'cuda':
+        # the GPU kernels keep per-point columns and per-problem constants in
+        # separate arguments, so the principal points travel in `params`
+        cuda_params = np.array([pp1n[0], pp1n[1], pp2n[0], pp2n[1]])
+        cuda_estimator = get_cuda_estimator('shared-focal', batch)
+        model, _, num_inliers, ransac_iterations = cuda_estimator.estimate(
+            data[:4], len(x1), max_error * scale, iterations=iterations,
+            min_iterations=min_iterations, success_prob=success_prob,
+            lo_iterations=lo_iterations, seed=seed, params=cuda_params)
+    else:
+        estimator = _get_default_estimator()
+        model, _, num_inliers, ransac_iterations = estimator.estimate(
+            data, len(x1), max_error * scale, iterations=iterations,
+            min_iterations=min_iterations, success_prob=success_prob,
+            lo_iterations=lo_iterations, seed=seed,
+            num_threads=num_threads, batch_per_thread=batch_per_thread)
 
     if num_inliers == 0:
         return ({'R': np.eye(3), 't': np.zeros(3), 'f': 1.0},
@@ -122,14 +143,22 @@ def estimate_relative_pose_with_shared_focal(
     if (final_refinement_iterations != 0
             and num_inliers > SixPointSharedFocalSolver.sample_size):
         final_refiner = _get_final_refiner()
-        inlier_data = _data_tuple(x1n[inliers], x2n[inliers], pp1n, pp2n)
-        refined_model = np.empty(14)
         num_final_iterations = (final_refiner.num_iterations
                                 if final_refinement_iterations is None
                                 else final_refinement_iterations)
-        if final_refiner.refine(inlier_data, model, refined_model,
-                                (max_error * scale) ** 2,
-                                num_final_iterations):
+        if cuda_estimator is not None:
+            # on device, through the same LM kernel built for the Cauchy loss
+            refined_model = cuda_estimator.final_refine(
+                model, (max_error * scale) ** 2, num_final_iterations,
+                final_refiner.loss)
+            ok = refined_model is not None
+        else:
+            inlier_data = _data_tuple(x1n[inliers], x2n[inliers], pp1n, pp2n)
+            refined_model = np.empty(14)
+            ok = final_refiner.refine(inlier_data, model, refined_model,
+                                      (max_error * scale) ** 2,
+                                      num_final_iterations)
+        if ok:
             R_c = refined_model[:9].reshape(3, 3).copy()
             t_c = refined_model[9:12].copy()
             f_c = float(refined_model[12] / scale)

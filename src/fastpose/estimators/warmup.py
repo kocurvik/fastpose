@@ -104,6 +104,50 @@ def _synthetic_correspondences(num_points=32):
     return np.ascontiguousarray(x1), np.ascontiguousarray(x2)
 
 
+def _synthetic_pose():
+    # the (R, t) `_synthetic_correspondences` generates its second view with
+    angle = np.deg2rad(4.0)
+    ca = np.cos(angle)
+    sa = np.sin(angle)
+    R = np.array([[ca, 0.0, sa],
+                  [0.0, 1.0, 0.0],
+                  [-sa, 0.0, ca]], dtype=np.float64)
+    t = np.array([0.25, 0.02, 0.01], dtype=np.float64)
+    return R, t
+
+
+def _synthetic_depths(x1):
+    """Per-image depths of the synthetic scene, for the monodepth warmups.
+
+    These points stay in the camera-1 frame - that is the frame monodepth
+    works in, unlike the absolute-pose warmups (see _synthetic_world_points).
+    """
+    rng = np.random.default_rng(0)
+    depth1 = rng.uniform(3.0, 6.0, size=len(x1))
+    world = np.column_stack([x1 * depth1[:, None], depth1])
+    R, t = _synthetic_pose()
+    depth2 = (world @ R.T + t)[:, 2]
+    return depth1, depth2
+
+
+def _synthetic_world_points(x1):
+    """World points for the absolute-pose warmups, in a frame that is not the
+    camera's.
+
+    The obvious construction - `column_stack([x1 * depth, depth])` - puts the
+    world origin *at* the camera, so the pose to recover is (I, 0). P3P copes;
+    **P4Pf does not**, and a zero translation made every hypothesis fail, so
+    the absolute-focal warmup silently reached neither the local-optimization
+    nor the final-polish kernel. Mapping the camera-frame points through the
+    synthetic pose gives a nonzero translation and fixes both backends.
+    """
+    rng = np.random.default_rng(0)
+    depth = rng.uniform(3.0, 6.0, size=len(x1))
+    X_cam = np.column_stack([x1 * depth[:, None], depth])
+    R, t = _synthetic_pose()
+    return np.ascontiguousarray((X_cam - t) @ R)   # rows are R^T (X_cam - t)
+
+
 def _warmup_steps(problem, iterations, lo_iterations,
                   final_refinement_iterations):
     """`(label, thunk)` pairs for the kernels `problem` selects, in run order.
@@ -144,9 +188,7 @@ def _warmup_steps(problem, iterations, lo_iterations,
         )))
 
     if selected("absolute"):
-        rng = np.random.default_rng(0)
-        depth = rng.uniform(3.0, 6.0, size=len(x1))
-        world = np.column_stack([x1 * depth[:, None], depth])
+        world = _synthetic_world_points(x1)
         steps.append(("absolute", lambda: estimate_absolute_pose(
             x1,
             world,
@@ -158,9 +200,7 @@ def _warmup_steps(problem, iterations, lo_iterations,
         )))
 
     if selected("absolute-focal"):
-        rng = np.random.default_rng(0)
-        depth = rng.uniform(3.0, 6.0, size=len(x1))
-        world = np.column_stack([x1 * depth[:, None], depth])
+        world = _synthetic_world_points(x1)
         steps.append(("absolute-focal",
                       lambda: estimate_absolute_pose_with_focal(
                           x1 * 1000.0,
@@ -209,19 +249,8 @@ def _warmup_steps(problem, iterations, lo_iterations,
                       )))
 
     if selected("monodepth"):
-        rng = np.random.default_rng(0)
-        depth1 = rng.uniform(3.0, 6.0, size=len(x1))
-        world = np.column_stack([x1 * depth1[:, None], depth1])
-        # exact depths of the warmup pose in camera 2 (R, t from
-        # _synthetic_correspondences)
-        angle = np.deg2rad(4.0)
-        ca = np.cos(angle)
-        sa = np.sin(angle)
-        R = np.array([[ca, 0.0, sa],
-                      [0.0, 1.0, 0.0],
-                      [-sa, 0.0, ca]], dtype=np.float64)
-        t = np.array([0.25, 0.02, 0.01], dtype=np.float64)
-        depth2 = (world @ R.T + t)[:, 2]
+        depth1, depth2 = _synthetic_depths(x1)
+        R, t = _synthetic_pose()
 
         for estimate_shift in (False, True):
             label = "monodepth-shift" if estimate_shift else "monodepth"
@@ -276,7 +305,7 @@ def _warmup_steps(problem, iterations, lo_iterations,
     return steps
 
 
-def _cuda_warmup_steps(iterations, lo_iterations,
+def _cuda_warmup_steps(problem, iterations, lo_iterations,
                        final_refinement_iterations):
     """Warmup steps for the CUDA backend, or `[]` when no device is usable.
 
@@ -287,26 +316,84 @@ def _cuda_warmup_steps(iterations, lo_iterations,
     loss, since the RANSAC-internal local optimization and the final polish
     pass use different ones - which is several seconds and is easy to mistake
     for the steady-state cost when benchmarking.
+
+    `lo_iterations` and `final_refinement_iterations` are floored at 1: a zero
+    skips the pass entirely and leaves its kernel cold, which is the one thing
+    this function exists to prevent.
     """
     from fastpose import cuda as cuda_backend
     if not cuda_backend.is_available():
         return []
 
     x1, x2 = _synthetic_correspondences()
+    world = _synthetic_world_points(x1)
+    pp1 = np.array([500.0, 480.0])
+    pp2 = np.array([620.0, 510.0])
+    lo = max(1, lo_iterations)
+    final = max(1, final_refinement_iterations)
     # a batch smaller than the point count keeps the warmup quick while still
     # compiling every kernel the driver launches, including a partial round
-    return [("essential-cuda", lambda: estimate_relative_pose(
-        x1,
-        x2,
-        iterations=iterations,
-        min_iterations=iterations,
-        max_error=0.002,
-        seed=0,
-        lo_iterations=max(1, lo_iterations),
-        final_refinement_iterations=max(1, final_refinement_iterations),
-        device='cuda',
-        batch=64,
-    ))]
+    common = dict(iterations=iterations, min_iterations=iterations, seed=0,
+                  lo_iterations=lo, final_refinement_iterations=final,
+                  device='cuda', batch=64)
+    steps = []
+
+    def selected(name):
+        return problem in ("all", name)
+
+    if selected("essential"):
+        steps.append(("essential-cuda", lambda: estimate_relative_pose(
+            x1, x2, max_error=0.002, **common)))
+
+    if selected("absolute"):
+        steps.append(("absolute-cuda", lambda: estimate_absolute_pose(
+            x1, world, max_error=0.002, **common)))
+
+    if selected("absolute-focal"):
+        steps.append(("absolute-focal-cuda",
+                      lambda: estimate_absolute_pose_with_focal(
+                          x1 * 1000.0, world, max_error=2.0, **common)))
+
+    if selected("fundamental"):
+        steps.append(("fundamental-cuda", lambda: estimate_fundamental(
+            x1 * 1000.0 + 500.0, x2 * 1000.0 + 500.0, max_error=2.0,
+            **common)))
+
+    if selected("varying-focal"):
+        steps.append(("varying-focal-cuda",
+                      lambda: estimate_relative_pose_with_varying_focals(
+                          x1 * 800.0 + pp1, x2 * 1300.0 + pp2, pp1, pp2,
+                          max_error=2.0, **common)))
+
+    if selected("shared-focal"):
+        # much the slowest of the seven to compile: the 6-point solve kernel
+        # inlines a 31x46 elimination template and a 15x15 Danilevsky chain
+        steps.append(("shared-focal-cuda",
+                      lambda: estimate_relative_pose_with_shared_focal(
+                          x1 * 1000.0 + pp1, x2 * 1000.0 + pp2, pp1, pp2,
+                          max_error=2.0, **common)))
+
+    if selected("monodepth"):
+        depth1, depth2 = _synthetic_depths(x1)
+        for estimate_shift in (False, True):
+            label = ("monodepth-shift-cuda" if estimate_shift
+                     else "monodepth-cuda")
+            steps.append((label,
+                          lambda estimate_shift=estimate_shift:
+                          estimate_relative_pose_with_monodepth(
+                              x1, x2, depth1, depth2,
+                              estimate_shift=estimate_shift, max_error=0.002,
+                              **common)))
+        steps.append(("monodepth-shared-focal-cuda",
+                      lambda: estimate_shared_focal_relative_pose_with_monodepth(
+                          x1 * 1000.0, x2 * 1000.0, depth1, depth2,
+                          max_error=2.0, **common)))
+        steps.append(("monodepth-varying-focal-cuda",
+                      lambda: estimate_varying_focal_relative_pose_with_monodepth(
+                          x1 * 1000.0, x2 * 1000.0, depth1, depth2,
+                          max_error=2.0, **common)))
+
+    return steps
 
 
 def warmup(problem="all", iterations=3, lo_iterations=1,
@@ -318,8 +405,8 @@ def warmup(problem="all", iterations=3, lo_iterations=1,
     if device in ("cpu", "all"):
         steps.extend(_warmup_steps(problem, iterations, lo_iterations,
                                    final_refinement_iterations))
-    if device in ("cuda", "all") and problem in ("all", "essential"):
-        steps.extend(_cuda_warmup_steps(iterations, lo_iterations,
+    if device in ("cuda", "all"):
+        steps.extend(_cuda_warmup_steps(problem, iterations, lo_iterations,
                                         final_refinement_iterations))
     bar = tqdm(steps, desc="warming up", unit="kernel", disable=not progress)
     for label, run in bar:
@@ -365,9 +452,8 @@ def main(argv=None):
         choices=("cpu", "cuda", "all"),
         default="cpu",
         help="Which backend's kernels to warm up. 'cuda' and 'all' are "
-             "no-ops when no CUDA device is available. The CUDA backend "
-             "currently covers the essential (calibrated relative pose) "
-             "problem only.",
+             "no-ops when no CUDA device is available. Every problem is "
+             "covered on both backends.",
     )
     parser.add_argument(
         "--no-progress",

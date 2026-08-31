@@ -122,10 +122,44 @@ def build_sampson_point_kernels(jit, real=float64):
         thr = min_depth * (one - a * a)
         return depth1 > thr and depth2 > thr
 
+    @jit()
+    def calibrate_epipolar_core(e, pp1x, pp1y, pp2x, pp2y, inv1, inv2, f, a):
+        # f = flat K2^-T e K1^-1 for a flat row-major 3x3 e, with inv1 = 1 / f1,
+        # inv2 = 1 / f2 and K = [[f, 0, ppx], [0, f, ppy], [0, 0, 1]]. The map is
+        # linear in e, so the focal refiners reuse it to push a tangent direction
+        # dE/dtheta through to dF/dtheta with the same code that builds F itself.
+        # `a` is caller-provided scratch (9), because np.empty is host-only.
+        # rows of A = K2^-T e, then columns of F = A K1^-1
+        for j in range(3):
+            a[j] = inv2 * e[j]
+            a[3 + j] = inv2 * e[3 + j]
+            a[6 + j] = e[6 + j] - inv2 * (pp2x * e[j] + pp2y * e[3 + j])
+        for i in range(3):
+            f[3 * i] = inv1 * a[3 * i]
+            f[3 * i + 1] = inv1 * a[3 * i + 1]
+            f[3 * i + 2] = (a[3 * i + 2]
+                            - inv1 * (pp1x * a[3 * i] + pp1y * a[3 * i + 1]))
+
+    @jit()
+    def model_to_fundamental_core(model, pp1x, pp1y, pp2x, pp2y, f, e, a):
+        # f = flat F = K2^-T E K1^-1 for a pose model [R | t | f1 | f2] with
+        # K = [[f, 0, ppx], [0, f, ppy], [0, 0, 1]]; False for invalid focals.
+        # `e` (9) and `a` (9) are caller-provided scratch.
+        f1 = model[12]
+        f2 = model[13]
+        if f1 <= real(0.0) or f2 <= real(0.0):
+            return False
+        essential_from_pose(model, e)
+        calibrate_epipolar_core(e, pp1x, pp1y, pp2x, pp2y, real(1.0) / f1,
+                                real(1.0) / f2, f, a)
+        return True
+
     return {
         'sampson_residual': sampson_residual,
         'essential_from_pose': essential_from_pose,
         'cheirality_ok': cheirality_ok,
+        'calibrate_epipolar_core': calibrate_epipolar_core,
+        'model_to_fundamental_core': model_to_fundamental_core,
     }
 
 
@@ -133,6 +167,8 @@ _CPU_POINT = build_sampson_point_kernels(cpu_jit)
 sampson_residual = _CPU_POINT['sampson_residual']
 essential_from_pose = _CPU_POINT['essential_from_pose']
 cheirality_ok = _CPU_POINT['cheirality_ok']
+_calibrate_epipolar_core = _CPU_POINT['calibrate_epipolar_core']
+_model_to_fundamental_core = _CPU_POINT['model_to_fundamental_core']
 
 
 @njit(cache=True, fastmath=True, inline='always')
@@ -325,35 +361,17 @@ class PoseSampsonScorer():
 
 @njit(cache=True)
 def calibrate_epipolar(e, pp1x, pp1y, pp2x, pp2y, inv1, inv2, f):
-    # f = flat K2^-T e K1^-1 for a flat row-major 3x3 e, with inv1 = 1 / f1,
-    # inv2 = 1 / f2 and K = [[f, 0, ppx], [0, f, ppy], [0, 0, 1]]. The map is
-    # linear in e, so the focal refiners reuse it to push a tangent direction
-    # dE/dtheta through to dF/dtheta with the same code that builds F itself.
-    # rows of A = K2^-T e, then columns of F = A K1^-1
+    # CPU wrapper: allocates the scratch the shared core wants passed in
     a = np.empty(9)
-    for j in range(3):
-        a[j] = inv2 * e[j]
-        a[3 + j] = inv2 * e[3 + j]
-        a[6 + j] = e[6 + j] - inv2 * (pp2x * e[j] + pp2y * e[3 + j])
-    for i in range(3):
-        f[3 * i] = inv1 * a[3 * i]
-        f[3 * i + 1] = inv1 * a[3 * i + 1]
-        f[3 * i + 2] = (a[3 * i + 2]
-                        - inv1 * (pp1x * a[3 * i] + pp1y * a[3 * i + 1]))
+    _calibrate_epipolar_core(e, pp1x, pp1y, pp2x, pp2y, inv1, inv2, f, a)
 
 
 @njit(cache=True)
 def model_to_fundamental(model, pp1x, pp1y, pp2x, pp2y, f):
-    # f = flat F = K2^-T E K1^-1 for a pose model [R | t | f1 | f2] with
-    # K = [[f, 0, ppx], [0, f, ppy], [0, 0, 1]]; False for invalid focals
-    f1 = model[12]
-    f2 = model[13]
-    if f1 <= 0.0 or f2 <= 0.0:
-        return False
+    # CPU wrapper: allocates the scratch the shared core wants passed in
     e = np.empty(9)
-    essential_from_pose(model, e)
-    calibrate_epipolar(e, pp1x, pp1y, pp2x, pp2y, 1.0 / f1, 1.0 / f2, f)
-    return True
+    a = np.empty(9)
+    return _model_to_fundamental_core(model, pp1x, pp1y, pp2x, pp2y, f, e, a)
 
 
 @njit(cache=True, fastmath=True)
