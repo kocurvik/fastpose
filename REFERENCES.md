@@ -112,10 +112,20 @@ The overall pipeline was not published as standalone work, but it was used as a 
 }
 ```
 
-The Bougnoux formula used to recover per-image focal lengths from the
-7-point fundamental matrix used for all solutions:
+Per-image focal lengths are recovered from the 7-point fundamental matrix
+with Rybkin's closed-form formula, an SVD-free algebraic equivalent of the
+Bougnoux formula:
 
 ```bibtex
+@thesis{rybkin2017robust,
+  title       = {Robust Focal Length Computation},
+  author      = {Rybkin, Oleh},
+  year        = {2017},
+  type        = {Bachelor's thesis},
+  institution = {Czech Technical University in Prague},
+  note        = {Supervised by Tom{\'a}{\v s} Pajdla}
+}
+
 @inproceedings{bougnoux1998projective,
   title     = {From projective to Euclidean space under any practical situation, a criticism of self-calibration},
   author    = {Bougnoux, Sylvain},

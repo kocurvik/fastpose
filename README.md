@@ -326,8 +326,9 @@ unknown focal lengths from pixel correspondences with known principal
 points:
 
 - **Minimal solver** (`src/fastpose/solvers/varying_focal.py`): standard
-  7-point fundamental matrix hypotheses, focal lengths from the Bougnoux
-  formula (square pixels, known principal points), then E = K2^T F K1
+  7-point fundamental matrix hypotheses, focal lengths from Rybkin's
+  closed-form formula (an SVD-free equivalent of the Bougnoux formula;
+  square pixels, known principal points), then E = K2^T F K1
   decomposed with the shared closed-form essential decomposition and
   cheirality check into pose models `[R | t | f1 | f2]` (14 flat
   parameters) — every cheirality-consistent candidate, as in the calibrated
@@ -341,8 +342,8 @@ points:
   tangent basis of the induced F. Local optimization refits over the 5x
   relaxed inlier subset, as `VaryingFocalRelativePoseEstimator::refine_model`
   does.
-- Hypotheses whose Bougnoux focal estimates are non-positive are rejected
-  inside the solver.
+- Hypotheses whose focal estimates are non-positive or non-finite are
+  rejected inside the solver.
 
 </details>
 

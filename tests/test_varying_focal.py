@@ -3,7 +3,7 @@ import numpy as np
 from benchmarks.utils import (generate_relpose_data, rotation_error_deg, skew,
                               translation_error_deg)
 from fastpose.estimators.varying_focal import estimate_relative_pose_with_varying_focals
-from fastpose.solvers.varying_focal import bougnoux_focals_sq
+from fastpose.solvers.varying_focal import rybkin_focals_sq
 
 
 def make_varying_focal_scene(seed, num_samples=100, noise_sigma=0.0,
@@ -27,7 +27,7 @@ def make_varying_focal_scene(seed, num_samples=100, noise_sigma=0.0,
     return x1, x2, R, t, f1, f2, pp1, pp2
 
 
-def test_bougnoux_recovers_focals_from_exact_fundamental():
+def test_rybkin_recovers_focals_from_exact_fundamental():
     x1, x2, R, t, f1, f2, pp1, pp2 = make_varying_focal_scene(0)
     E = skew(t) @ R
     K1 = np.array([[f1, 0.0, pp1[0]], [0.0, f1, pp1[1]], [0.0, 0.0, 1.0]])
@@ -35,8 +35,8 @@ def test_bougnoux_recovers_focals_from_exact_fundamental():
     F = np.linalg.inv(K2).T @ E @ np.linalg.inv(K1)
 
     focals_sq = np.empty(2)
-    assert bougnoux_focals_sq(F.ravel(), pp1[0], pp1[1], pp2[0], pp2[1],
-                              focals_sq)
+    assert rybkin_focals_sq(np.ascontiguousarray(F.ravel()), pp1[0], pp1[1],
+                            pp2[0], pp2[1], focals_sq)
     np.testing.assert_allclose(np.sqrt(focals_sq), [f1, f2], rtol=1e-8)
 
 

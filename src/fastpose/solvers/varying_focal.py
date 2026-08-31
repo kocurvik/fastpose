@@ -1,14 +1,14 @@
 """7-point relative pose solver with two unknown focal lengths.
 
 The minimal step estimates fundamental matrices with the standard 7-point
-solver, applies the Bougnoux formula for known principal points and square
-pixels, then decomposes the resulting essential matrix into a pose model
-`[R | t | f1 | f2]`.
+solver, recovers the focal lengths with Rybkin's closed-form formula for
+known principal points and square pixels (an SVD-free equivalent of the
+Bougnoux formula), then decomposes the resulting essential matrix into a
+pose model `[R | t | f1 | f2]`.
 """
 
 import math
 
-import numpy as np
 from numba import njit
 
 from fastpose.solvers.essential import _pose_from_essential
@@ -18,105 +18,49 @@ MODEL_SIZE = 14
 
 
 @njit(cache=True, inline='always')
-def _skew3(x, S):
-    S[0, 0] = 0.0
-    S[0, 1] = -x[2]
-    S[0, 2] = x[1]
-    S[1, 0] = x[2]
-    S[1, 1] = 0.0
-    S[1, 2] = -x[0]
-    S[2, 0] = -x[1]
-    S[2, 1] = x[0]
-    S[2, 2] = 0.0
+def _rybkin_f_sq(f11, f12, f13, f21, f22, f23, f31, f32, f33):
+    # Rybkin's formula: squared focal length of the *first* camera from the
+    # entries of a fundamental matrix with both principal points at the
+    # origin (called with the transposed entries it yields the second
+    # camera's). Algebraically equivalent to the Bougnoux formula but a pure
+    # polynomial ratio - no epipoles, no SVD. A zero denominator (the same
+    # optical-axes-intersect degeneracy Bougnoux has) yields inf/nan, which
+    # the caller's positivity-and-finiteness check rejects.
+    den = (f11 * f12 * f31 * f33 - f11 * f13 * f31 * f32
+           + f12 * f12 * f32 * f33 - f12 * f13 * f32 * f32
+           + f21 * f22 * f31 * f33 - f21 * f23 * f31 * f32
+           + f22 * f22 * f32 * f33 - f22 * f23 * f32 * f32)
+    num = -f33 * (f12 * f13 * f33 - f13 * f13 * f32
+                  + f22 * f23 * f33 - f23 * f23 * f32)
+    return num / den
 
 
-@njit(cache=True, inline='always')
-def _mat3_vec(A, x, y):
-    for i in range(3):
-        y[i] = A[i, 0] * x[0] + A[i, 1] * x[1] + A[i, 2] * x[2]
+@njit(cache=True)
+def rybkin_focals_sq(F, pp1x, pp1y, pp2x, pp2y, out):
+    # squared focal lengths of both cameras from a flat row-major fundamental
+    # matrix and the principal points; out[0] = f1^2, out[1] = f2^2. First
+    # conjugates F with the principal point translations (Fc = P2^T F P1, the
+    # fundamental matrix of the centered coordinates), then applies Rybkin's
+    # formula to Fc and Fc^T. Deliberately not fastmath: the finiteness and
+    # positivity guards must be honest about the nan/inf a degenerate
+    # denominator produces, because the caller feeds the result to math.sqrt
+    # inside the RANSAC driver where an exception cannot propagate.
+    c00 = F[0]
+    c01 = F[1]
+    c02 = F[0] * pp1x + F[1] * pp1y + F[2]
+    c10 = F[3]
+    c11 = F[4]
+    c12 = F[3] * pp1x + F[4] * pp1y + F[5]
+    c20 = pp2x * F[0] + pp2y * F[3] + F[6]
+    c21 = pp2x * F[1] + pp2y * F[4] + F[7]
+    c22 = pp2x * c02 + pp2y * c12 + F[6] * pp1x + F[7] * pp1y + F[8]
 
-
-@njit(cache=True, inline='always')
-def _mat3_mul_local(A, B, C):
-    for i in range(3):
-        for j in range(3):
-            C[i, j] = A[i, 0] * B[0, j] + A[i, 1] * B[1, j] + A[i, 2] * B[2, j]
-
-
-@njit(cache=True, fastmath=True)
-def bougnoux_focals_sq(F, pp1x, pp1y, pp2x, pp2y, out):
-    M = F.reshape(3, 3)
-    U, s, Vt = np.linalg.svd(M)
-    if abs(U[2, 2]) < 1e-12 or abs(Vt[2, 2]) < 1e-12:
-        return False
-
-    e1 = np.empty(3)
-    e2 = np.empty(3)
-    for i in range(3):
-        e1[i] = Vt[2, i] / Vt[2, 2]
-        e2[i] = U[i, 2] / U[2, 2]
-
-    p1 = np.empty(3)
-    p2 = np.empty(3)
-    p1[0] = pp1x
-    p1[1] = pp1y
-    p1[2] = 1.0
-    p2[0] = pp2x
-    p2[1] = pp2y
-    p2[2] = 1.0
-
-    ex1 = np.empty((3, 3))
-    ex2 = np.empty((3, 3))
-    _skew3(e1, ex1)
-    _skew3(e2, ex2)
-
-    IF = np.empty((3, 3))
-    IFT = np.empty((3, 3))
-    for j in range(3):
-        IF[0, j] = M[0, j]
-        IF[1, j] = M[1, j]
-        IF[2, j] = 0.0
-        IFT[0, j] = M[j, 0]
-        IFT[1, j] = M[j, 1]
-        IFT[2, j] = 0.0
-
-    tmp3 = np.empty((3, 3))
-    A = np.empty((3, 3))
-    _mat3_mul_local(ex2, IF, A)
-    v = np.empty(3)
-    _mat3_vec(M, p1, v)
-    fp = p2[0] * v[0] + p2[1] * v[1] + v[2]
-    _mat3_vec(A, p1, v)
-    n1 = p2[0] * v[0] + p2[1] * v[1] + v[2]
-    # p2^T [e2]_x I F I F^T p2
-    FIT = np.empty((3, 3))
-    for j in range(3):
-        FIT[0, j] = M[j, 0]
-        FIT[1, j] = M[j, 1]
-        FIT[2, j] = 0.0
-    _mat3_mul_local(A, FIT, tmp3)
-    _mat3_vec(tmp3, p2, v)
-    d1 = p2[0] * v[0] + p2[1] * v[1] + v[2]
-
-    _mat3_mul_local(ex1, IFT, A)
-    _mat3_vec(M.T, p2, v)
-    fp_t = p1[0] * v[0] + p1[1] * v[1] + v[2]
-    _mat3_vec(A, p2, v)
-    n2 = p1[0] * v[0] + p1[1] * v[1] + v[2]
-    FI = np.empty((3, 3))
-    for j in range(3):
-        FI[0, j] = M[0, j]
-        FI[1, j] = M[1, j]
-        FI[2, j] = 0.0
-    _mat3_mul_local(A, FI, tmp3)
-    _mat3_vec(tmp3, p1, v)
-    d2 = p1[0] * v[0] + p1[1] * v[1] + v[2]
-
-    if abs(d1) < 1e-18 or abs(d2) < 1e-18:
-        return False
-    out[0] = -n1 * fp / d1
-    out[1] = -n2 * fp_t / d2
-    return out[0] > 0.0 and out[1] > 0.0
+    f1_sq = _rybkin_f_sq(c00, c01, c02, c10, c11, c12, c20, c21, c22)
+    f2_sq = _rybkin_f_sq(c00, c10, c20, c01, c11, c21, c02, c12, c22)
+    out[0] = f1_sq
+    out[1] = f2_sq
+    return (f1_sq > 0.0 and f2_sq > 0.0
+            and math.isfinite(f1_sq) and math.isfinite(f2_sq))
 
 
 @njit(cache=True, fastmath=True)
@@ -173,7 +117,7 @@ def _solve_varying_focal_7pt(data, sample, models, workspace):
         beta = 1.0 - alpha
         for j in range(9):
             tmp[j] = alpha * f_a[j] + beta * f_b[j]
-        if not bougnoux_focals_sq(tmp, pp1x, pp1y, pp2x, pp2y, focals_sq):
+        if not rybkin_focals_sq(tmp, pp1x, pp1y, pp2x, pp2y, focals_sq):
             continue
         f1 = math.sqrt(focals_sq[0])
         f2 = math.sqrt(focals_sq[1])
