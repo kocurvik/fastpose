@@ -32,4 +32,4 @@ fastpose-warmup = "fastpose.estimators.warmup:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-packages = ["fastpose", "fastpose.estimators", "fastpose.refiners", "fastpose.scorers", "fastpose.solvers"]
+packages = ["fastpose", "fastpose.cuda", "fastpose.estimators", "fastpose.refiners", "fastpose.scorers", "fastpose.solvers"]

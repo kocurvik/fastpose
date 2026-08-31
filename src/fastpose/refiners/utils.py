@@ -19,8 +19,9 @@ subset the way poselib's `refine_model` does (see `LO_INLIER_SCALE`).
 import math
 
 import numpy as np
-from numba import njit
+from numba import float64, njit
 
+from fastpose.jit_backend import cpu_jit
 from fastpose.kernel_cache import stabilize
 from fastpose.refiners.losses import TruncatedLoss
 from fastpose.scorers.sampson import (MIN_DEPTH, cheirality_ok,
@@ -41,103 +42,177 @@ STATE_SIZE = 19
 LO_INLIER_SCALE = 5.0
 
 
-@njit(cache=True, inline='always')
-def mat3_mul(A, B, C):
-    # C = A @ B for 3x3 matrices
-    for i in range(3):
+# ---------------------------------------------------------------------------
+# primitives shared with the CUDA refiner
+#
+# `fastpose/cuda/refiners.py` runs the same LM on the GPU, but as a block
+# reduction rather than a serial loop, so it cannot reuse the accumulate
+# kernel below. It must agree with it term for term, which is what building
+# the retraction, the tangent basis and the per-point Sampson jacobian from
+# one factory guarantees. See fastpose/jit_backend.py for the `jit` shim.
+#
+# `essential_tangent_rows_core` takes its two basis vectors as arguments
+# because `np.empty` does not compile in device code; the CPU wrapper below
+# restores the original three-argument signature.
+# ---------------------------------------------------------------------------
+
+def build_refiner_primitives(jit, real=float64):
+    # `real` types the float literals in `sampson_point_jacobian`, the only
+    # kernel here that runs per point and so the only one the CUDA refiner
+    # builds in float32; see build_sampson_point_kernels for why a bare
+    # literal would silently promote the expression back to float64. The
+    # retraction and tangent-basis kernels are O(1) per LM step and stay
+    # float64 regardless.
+    @jit(inline=True)
+    def mat3_mul(A, B, C):
+        # C = A @ B for 3x3 matrices
+        for i in range(3):
+            for j in range(3):
+                C[i, j] = (A[i, 0] * B[0, j] + A[i, 1] * B[1, j]
+                           + A[i, 2] * B[2, j])
+
+    @jit(inline=True)
+    def rodrigues(w0, w1, w2, R):
+        # R = exp([w]_x) via the Rodrigues formula, Taylor expansion near zero
+        theta_sq = w0 * w0 + w1 * w1 + w2 * w2
+        theta = math.sqrt(theta_sq)
+        if theta < 1e-9:
+            a = 1.0 - theta_sq / 6.0
+            b = 0.5 - theta_sq / 24.0
+        else:
+            a = math.sin(theta) / theta
+            b = (1.0 - math.cos(theta)) / theta_sq
+        R[0, 0] = 1.0 - b * (w1 * w1 + w2 * w2)
+        R[0, 1] = -a * w2 + b * w0 * w1
+        R[0, 2] = a * w1 + b * w0 * w2
+        R[1, 0] = a * w2 + b * w0 * w1
+        R[1, 1] = 1.0 - b * (w0 * w0 + w2 * w2)
+        R[1, 2] = -a * w0 + b * w1 * w2
+        R[2, 0] = -a * w1 + b * w0 * w2
+        R[2, 1] = a * w0 + b * w1 * w2
+        R[2, 2] = 1.0 - b * (w0 * w0 + w1 * w1)
+
+    @jit()
+    def tangent_basis(t, b1, b2):
+        # orthonormal basis (b1, b2) of the plane orthogonal to the unit
+        # vector t; deterministic in t so the jacobian and the retraction
+        # always agree
+        a0 = abs(t[0])
+        a1 = abs(t[1])
+        a2 = abs(t[2])
+        # b1 = t x e_k for the axis e_k of the smallest |component|
+        if a0 <= a1 and a0 <= a2:
+            b1[0] = 0.0
+            b1[1] = t[2]
+            b1[2] = -t[1]
+        elif a1 <= a2:
+            b1[0] = -t[2]
+            b1[1] = 0.0
+            b1[2] = t[0]
+        else:
+            b1[0] = t[1]
+            b1[1] = -t[0]
+            b1[2] = 0.0
+        inv = 1.0 / math.sqrt(b1[0] * b1[0] + b1[1] * b1[1] + b1[2] * b1[2])
+        b1[0] *= inv
+        b1[1] *= inv
+        b1[2] *= inv
+        b2[0] = t[1] * b1[2] - t[2] * b1[1]
+        b2[1] = t[2] * b1[0] - t[0] * b1[2]
+        b2[2] = t[0] * b1[1] - t[1] * b1[0]
+
+    @jit()
+    def essential_tangent_rows_core(pose, e, B, b1, b2):
+        # rows 0..4 of B: dE/dtheta as flat 9-vectors for the 5 tangent
+        # parameters of E = [t]_x R with t on the unit sphere, given the pose
+        # [R (row-major 3x3) | t] and its flat E.
+        #
+        # rows 0..2 (rotation, retraction R exp([w]_x)): dE/dw_k = E skew(e_k),
+        # plain column shuffles of E
+        for i in range(3):
+            e0 = e[3 * i]
+            e1 = e[3 * i + 1]
+            e2 = e[3 * i + 2]
+            B[0, 3 * i] = 0.0
+            B[0, 3 * i + 1] = e2
+            B[0, 3 * i + 2] = -e1
+            B[1, 3 * i] = -e2
+            B[1, 3 * i + 1] = 0.0
+            B[1, 3 * i + 2] = e0
+            B[2, 3 * i] = e1
+            B[2, 3 * i + 1] = -e0
+            B[2, 3 * i + 2] = 0.0
+
+        # rows 3..4 (translation): dE/dalpha_i = [b_i]_x R, since dt/dalpha_i
+        # is b_i on the unit sphere (b_i is orthogonal to t, so the
+        # renormalization in the retraction is second order)
+        tangent_basis(pose[9:12], b1, b2)
         for j in range(3):
-            C[i, j] = A[i, 0] * B[0, j] + A[i, 1] * B[1, j] + A[i, 2] * B[2, j]
+            r0 = pose[j]
+            r1 = pose[3 + j]
+            r2 = pose[6 + j]
+            B[3, j] = -b1[2] * r1 + b1[1] * r2
+            B[3, 3 + j] = b1[2] * r0 - b1[0] * r2
+            B[3, 6 + j] = -b1[1] * r0 + b1[0] * r1
+            B[4, j] = -b2[2] * r1 + b2[1] * r2
+            B[4, 3 + j] = b2[2] * r0 - b2[0] * r2
+            B[4, 6 + j] = -b2[1] * r0 + b2[0] * r1
+
+    @jit(fastmath=True, inline=True)
+    def sampson_point_jacobian(f, x, y, xp, yp, dsdF):
+        # Sampson residual s_i = residual / sqrt(denominator) of one
+        # correspondence and its derivative ds_i/dF as a flat 9-vector.
+        # Returns (s_i, ok); ok is False for a degenerate (zero-denominator)
+        # model, where dsdF is left untouched and the caller drops the point.
+        fx1_0 = f[0] * x + f[1] * y + f[2]
+        fx1_1 = f[3] * x + f[4] * y + f[5]
+        fx1_2 = f[6] * x + f[7] * y + f[8]
+        ftx2_0 = f[0] * xp + f[3] * yp + f[6]
+        ftx2_1 = f[1] * xp + f[4] * yp + f[7]
+        residual = xp * fx1_0 + yp * fx1_1 + fx1_2
+        denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
+                       + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
+        if denominator <= 0.0:
+            return real(0.0), False
+
+        inv_sqrt_den = real(1.0) / math.sqrt(denominator)
+        s_i = residual * inv_sqrt_den
+        c = s_i / denominator
+        dsdF[0] = inv_sqrt_den * xp * x - c * (fx1_0 * x + xp * ftx2_0)
+        dsdF[1] = inv_sqrt_den * xp * y - c * (fx1_0 * y + xp * ftx2_1)
+        dsdF[2] = inv_sqrt_den * xp - c * fx1_0
+        dsdF[3] = inv_sqrt_den * yp * x - c * (fx1_1 * x + yp * ftx2_0)
+        dsdF[4] = inv_sqrt_den * yp * y - c * (fx1_1 * y + yp * ftx2_1)
+        dsdF[5] = inv_sqrt_den * yp - c * fx1_1
+        dsdF[6] = inv_sqrt_den * x - c * ftx2_0
+        dsdF[7] = inv_sqrt_den * y - c * ftx2_1
+        dsdF[8] = inv_sqrt_den
+        return s_i, True
+
+    return {
+        'mat3_mul': mat3_mul,
+        'rodrigues': rodrigues,
+        'tangent_basis': tangent_basis,
+        'essential_tangent_rows_core': essential_tangent_rows_core,
+        'sampson_point_jacobian': sampson_point_jacobian,
+    }
 
 
-@njit(cache=True, inline='always')
-def rodrigues(w0, w1, w2, R):
-    # R = exp([w]_x) via the Rodrigues formula, Taylor expansion near zero
-    theta_sq = w0 * w0 + w1 * w1 + w2 * w2
-    theta = math.sqrt(theta_sq)
-    if theta < 1e-9:
-        a = 1.0 - theta_sq / 6.0
-        b = 0.5 - theta_sq / 24.0
-    else:
-        a = math.sin(theta) / theta
-        b = (1.0 - math.cos(theta)) / theta_sq
-    R[0, 0] = 1.0 - b * (w1 * w1 + w2 * w2)
-    R[0, 1] = -a * w2 + b * w0 * w1
-    R[0, 2] = a * w1 + b * w0 * w2
-    R[1, 0] = a * w2 + b * w0 * w1
-    R[1, 1] = 1.0 - b * (w0 * w0 + w2 * w2)
-    R[1, 2] = -a * w0 + b * w1 * w2
-    R[2, 0] = -a * w1 + b * w0 * w2
-    R[2, 1] = a * w0 + b * w1 * w2
-    R[2, 2] = 1.0 - b * (w0 * w0 + w1 * w1)
-
-
-@njit(cache=True)
-def tangent_basis(t, b1, b2):
-    # orthonormal basis (b1, b2) of the plane orthogonal to the unit vector
-    # t; deterministic in t so the jacobian and the retraction always agree
-    a0 = abs(t[0])
-    a1 = abs(t[1])
-    a2 = abs(t[2])
-    # b1 = t x e_k for the axis e_k of the smallest |component|
-    if a0 <= a1 and a0 <= a2:
-        b1[0] = 0.0
-        b1[1] = t[2]
-        b1[2] = -t[1]
-    elif a1 <= a2:
-        b1[0] = -t[2]
-        b1[1] = 0.0
-        b1[2] = t[0]
-    else:
-        b1[0] = t[1]
-        b1[1] = -t[0]
-        b1[2] = 0.0
-    inv = 1.0 / math.sqrt(b1[0] * b1[0] + b1[1] * b1[1] + b1[2] * b1[2])
-    b1[0] *= inv
-    b1[1] *= inv
-    b1[2] *= inv
-    b2[0] = t[1] * b1[2] - t[2] * b1[1]
-    b2[1] = t[2] * b1[0] - t[0] * b1[2]
-    b2[2] = t[0] * b1[1] - t[1] * b1[0]
+_CPU_PRIM = build_refiner_primitives(cpu_jit)
+mat3_mul = _CPU_PRIM['mat3_mul']
+rodrigues = _CPU_PRIM['rodrigues']
+tangent_basis = _CPU_PRIM['tangent_basis']
+_essential_tangent_rows_core = _CPU_PRIM['essential_tangent_rows_core']
+sampson_point_jacobian = _CPU_PRIM['sampson_point_jacobian']
 
 
 @njit(cache=True)
 def essential_tangent_rows(pose, e, B):
-    # rows 0..4 of B: dE/dtheta as flat 9-vectors for the 5 tangent
-    # parameters of E = [t]_x R with t on the unit sphere, given the pose
-    # [R (row-major 3x3) | t] and its flat E.
-    #
-    # rows 0..2 (rotation, retraction R exp([w]_x)): dE/dw_k = E skew(e_k),
-    # plain column shuffles of E
-    for i in range(3):
-        e0 = e[3 * i]
-        e1 = e[3 * i + 1]
-        e2 = e[3 * i + 2]
-        B[0, 3 * i] = 0.0
-        B[0, 3 * i + 1] = e2
-        B[0, 3 * i + 2] = -e1
-        B[1, 3 * i] = -e2
-        B[1, 3 * i + 1] = 0.0
-        B[1, 3 * i + 2] = e0
-        B[2, 3 * i] = e1
-        B[2, 3 * i + 1] = -e0
-        B[2, 3 * i + 2] = 0.0
-
-    # rows 3..4 (translation): dE/dalpha_i = [b_i]_x R, since dt/dalpha_i is
-    # b_i on the unit sphere (b_i is orthogonal to t, so the renormalization
-    # in the retraction is second order)
+    # CPU wrapper restoring the three-argument signature; the GPU kernel
+    # allocates b1/b2 as per-thread local arrays and calls the core directly
     b1 = np.empty(3)
     b2 = np.empty(3)
-    tangent_basis(pose[9:12], b1, b2)
-    for j in range(3):
-        r0 = pose[j]
-        r1 = pose[3 + j]
-        r2 = pose[6 + j]
-        B[3, j] = -b1[2] * r1 + b1[1] * r2
-        B[3, 3 + j] = b1[2] * r0 - b1[0] * r2
-        B[3, 6 + j] = -b1[1] * r0 + b1[0] * r1
-        B[4, j] = -b2[2] * r1 + b2[1] * r2
-        B[4, 3 + j] = b2[2] * r0 - b2[0] * r2
-        B[4, 6 + j] = -b2[1] * r0 + b2[0] * r1
+    _essential_tangent_rows_core(pose, e, B, b1, b2)
 
 
 @njit(cache=True)
@@ -305,35 +380,13 @@ def build_sampson_accumulate(loss):
             y = x1_y[i]
             xp = x2_x[i]
             yp = x2_y[i]
-            fx1_0 = f[0] * x + f[1] * y + f[2]
-            fx1_1 = f[3] * x + f[4] * y + f[5]
-            fx1_2 = f[6] * x + f[7] * y + f[8]
-            ftx2_0 = f[0] * xp + f[3] * yp + f[6]
-            ftx2_1 = f[1] * xp + f[4] * yp + f[7]
-            residual = xp * fx1_0 + yp * fx1_1 + fx1_2
-            denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
-                           + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
-            if denominator <= 0.0:
+            s_i, ok = sampson_point_jacobian(f, x, y, xp, yp, dsdF)
+            if not ok:
                 continue
-
-            # s_i = residual / sqrt(denominator); ds_i/dF as flat 9-vector
-            inv_sqrt_den = 1.0 / math.sqrt(denominator)
-            s_i = residual * inv_sqrt_den
             w = weight_fn(s_i * s_i, max_error_sq)
             if w <= 0.0:
                 continue
             num_residuals += 1
-
-            c = s_i / denominator
-            dsdF[0] = inv_sqrt_den * xp * x - c * (fx1_0 * x + xp * ftx2_0)
-            dsdF[1] = inv_sqrt_den * xp * y - c * (fx1_0 * y + xp * ftx2_1)
-            dsdF[2] = inv_sqrt_den * xp - c * fx1_0
-            dsdF[3] = inv_sqrt_den * yp * x - c * (fx1_1 * x + yp * ftx2_0)
-            dsdF[4] = inv_sqrt_den * yp * y - c * (fx1_1 * y + yp * ftx2_1)
-            dsdF[5] = inv_sqrt_den * yp - c * fx1_1
-            dsdF[6] = inv_sqrt_den * x - c * ftx2_0
-            dsdF[7] = inv_sqrt_den * y - c * ftx2_1
-            dsdF[8] = inv_sqrt_den
 
             for p in range(num_tangent):
                 acc = 0.0

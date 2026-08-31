@@ -23,7 +23,9 @@ kernels from `build_pose_sampson_cost`) are what the LM refiners use.
 import math
 
 import numpy as np
-from numba import njit
+from numba import float64, njit
+
+from fastpose.jit_backend import cpu_jit
 
 
 # points per early-bail-out check. The block helpers below are called with
@@ -32,6 +34,105 @@ from numba import njit
 # with a runtime `end` does not vectorize (it compiles to a mostly scalar
 # loop, which cost ~2x on the O(ransac_iterations x n) scorers).
 SCORE_CHUNK = 512
+
+# minimum depth poselib's robust/utils.cc passes to check_cheirality, in
+# units of the pose translation (unit norm for the models this package
+# produces, so effectively a fraction of the baseline)
+MIN_DEPTH = 0.01
+
+
+# ---------------------------------------------------------------------------
+# per-point primitives, shared by the CPU scorers below and by the CUDA
+# reduction scorer in fastpose/cuda/scorers.py
+#
+# These are the only place the Sampson residual, the pose-to-E map and the
+# cheirality test are written down. The GPU scorer is a block reduction rather
+# than a serial blocked loop, so it cannot reuse the *_score kernels below -
+# but it must agree with them point for point, which is what sharing these
+# three primitives guarantees. `inline=True` everywhere: on the CPU they are
+# inlined at the Numba IR level and lowered with their caller's fastmath, so
+# the blocked loops still vectorize exactly as before.
+# ---------------------------------------------------------------------------
+
+def build_sampson_point_kernels(jit, real=float64):
+    # `real` is the numba type every float literal in these kernels is cast
+    # to. It exists because a bare Python literal is float64 in numba, so a
+    # single `1.0` in an otherwise float32 expression promotes the whole chain
+    # back to float64 - silently undoing the mixed precision. The CUDA scorer
+    # and LM build these with float32; everything else uses the default.
+    @jit(fastmath=True, inline=True)
+    def sampson_residual(f, x, y, xp, yp):
+        # squared Sampson numerator and denominator of one correspondence
+        # under the flat row-major 3x3 epipolar matrix f. Returned unreduced
+        # so callers can apply the inlier test without dividing for outliers;
+        # a denominator of zero marks a degenerate model and is the caller's
+        # cue to take the outlier branch rather than divide.
+        fx1_0 = f[0] * x + f[1] * y + f[2]
+        fx1_1 = f[3] * x + f[4] * y + f[5]
+        fx1_2 = f[6] * x + f[7] * y + f[8]
+        ftx2_0 = f[0] * xp + f[3] * yp + f[6]
+        ftx2_1 = f[1] * xp + f[4] * yp + f[7]
+        residual = xp * fx1_0 + yp * fx1_1 + fx1_2
+        denominator = (fx1_0 * fx1_0 + fx1_1 * fx1_1
+                       + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1)
+        return residual * residual, denominator
+
+    @jit(inline=True)
+    def essential_from_pose(pose, e):
+        # e = flat E = [t]_x R for a pose model [R (row-major 3x3) | t (3)];
+        # any t scale (the Sampson error is invariant to it)
+        tx = pose[9]
+        ty = pose[10]
+        tz = pose[11]
+        for j in range(3):
+            r0 = pose[j]
+            r1 = pose[3 + j]
+            r2 = pose[6 + j]
+            e[j] = -tz * r1 + ty * r2
+            e[3 + j] = tz * r0 - tx * r2
+            e[6 + j] = -ty * r0 + tx * r1
+
+    @jit(inline=True)
+    def cheirality_ok(pose, x, y, xp, yp, min_depth):
+        # poselib's check_cheirality (misc/essential.cc): the two depths from
+        # the least-squares intersection of the unit rays through the
+        # calibrated points (x, y) and (xp, yp) must both exceed min_depth.
+        # The common 1 / (1 - a^2) factor is positive, so upstream drops it
+        # and scales min_depth by (1 - a^2) instead; kept identical here.
+        one = real(1.0)
+        inv1 = one / math.sqrt(x * x + y * y + one)
+        inv2 = one / math.sqrt(xp * xp + yp * yp + one)
+        u0 = x * inv1
+        u1 = y * inv1
+        u2 = inv1
+        v0 = xp * inv2
+        v1 = yp * inv2
+        v2 = inv2
+        ru0 = pose[0] * u0 + pose[1] * u1 + pose[2] * u2
+        ru1 = pose[3] * u0 + pose[4] * u1 + pose[5] * u2
+        ru2 = pose[6] * u0 + pose[7] * u1 + pose[8] * u2
+        tx = pose[9]
+        ty = pose[10]
+        tz = pose[11]
+        a = -(ru0 * v0 + ru1 * v1 + ru2 * v2)
+        b1 = -(ru0 * tx + ru1 * ty + ru2 * tz)
+        b2 = v0 * tx + v1 * ty + v2 * tz
+        depth1 = b1 - a * b2
+        depth2 = b2 - a * b1
+        thr = min_depth * (one - a * a)
+        return depth1 > thr and depth2 > thr
+
+    return {
+        'sampson_residual': sampson_residual,
+        'essential_from_pose': essential_from_pose,
+        'cheirality_ok': cheirality_ok,
+    }
+
+
+_CPU_POINT = build_sampson_point_kernels(cpu_jit)
+sampson_residual = _CPU_POINT['sampson_residual']
+essential_from_pose = _CPU_POINT['essential_from_pose']
+cheirality_ok = _CPU_POINT['cheirality_ok']
 
 
 @njit(cache=True, fastmath=True, inline='always')
@@ -42,18 +143,7 @@ def _sampson_block(f, x1_x, x1_y, x2_x, x2_y, start, count, max_error_sq):
     num_inliers = 0
     for j in range(count):
         i = start + j
-        x = x1_x[i]
-        y = x1_y[i]
-        xp = x2_x[i]
-        yp = x2_y[i]
-        fx1_0 = f[0] * x + f[1] * y + f[2]
-        fx1_1 = f[3] * x + f[4] * y + f[5]
-        fx1_2 = f[6] * x + f[7] * y + f[8]
-        ftx2_0 = f[0] * xp + f[3] * yp + f[6]
-        ftx2_1 = f[1] * xp + f[4] * yp + f[7]
-        residual = xp * fx1_0 + yp * fx1_1 + fx1_2
-        denominator = fx1_0 * fx1_0 + fx1_1 * fx1_1 + ftx2_0 * ftx2_0 + ftx2_1 * ftx2_1
-        r2 = residual * residual
+        r2, denominator = sampson_residual(f, x1_x[i], x1_y[i], x2_x[i], x2_y[i])
         # r2 / denominator < max_error_sq, without dividing for outliers.
         # Degenerate models can make the Sampson denominator exactly zero;
         # keep those points in the outlier branch instead of dividing.
@@ -138,22 +228,6 @@ class SampsonScorer():
         return _msac(errors, inliers, max_error_sq), inliers, int(np.count_nonzero(inliers))
 
 
-@njit(cache=True, inline='always')
-def essential_from_pose(pose, e):
-    # e = flat E = [t]_x R for a pose model [R (row-major 3x3) | t (3)];
-    # any t scale (the Sampson error is invariant to it)
-    tx = pose[9]
-    ty = pose[10]
-    tz = pose[11]
-    for j in range(3):
-        r0 = pose[j]
-        r1 = pose[3 + j]
-        r2 = pose[6 + j]
-        e[j] = -tz * r1 + ty * r2
-        e[3 + j] = tz * r0 - tx * r2
-        e[6 + j] = -ty * r0 + tx * r1
-
-
 @njit(cache=True, fastmath=True)
 def pose_sampson_score(model, data, max_error_sq, best_score):
     # scorer for pose models: assemble E = [t]_x R, then the shared
@@ -163,42 +237,6 @@ def pose_sampson_score(model, data, max_error_sq, best_score):
     e = np.empty(9)
     essential_from_pose(model, e)
     return sampson_score(e, data, max_error_sq, best_score)
-
-
-# minimum depth poselib's robust/utils.cc passes to check_cheirality, in
-# units of the pose translation (unit norm for the models this package
-# produces, so effectively a fraction of the baseline)
-MIN_DEPTH = 0.01
-
-
-@njit(cache=True, inline='always')
-def cheirality_ok(pose, x, y, xp, yp, min_depth):
-    # poselib's check_cheirality (misc/essential.cc): the two depths from the
-    # least-squares intersection of the unit rays through the calibrated
-    # points (x, y) and (xp, yp) must both exceed min_depth. The common
-    # 1 / (1 - a^2) factor is positive, so upstream drops it and scales
-    # min_depth by (1 - a^2) instead; kept identical here.
-    inv1 = 1.0 / math.sqrt(x * x + y * y + 1.0)
-    inv2 = 1.0 / math.sqrt(xp * xp + yp * yp + 1.0)
-    u0 = x * inv1
-    u1 = y * inv1
-    u2 = inv1
-    v0 = xp * inv2
-    v1 = yp * inv2
-    v2 = inv2
-    ru0 = pose[0] * u0 + pose[1] * u1 + pose[2] * u2
-    ru1 = pose[3] * u0 + pose[4] * u1 + pose[5] * u2
-    ru2 = pose[6] * u0 + pose[7] * u1 + pose[8] * u2
-    tx = pose[9]
-    ty = pose[10]
-    tz = pose[11]
-    a = -(ru0 * v0 + ru1 * v1 + ru2 * v2)
-    b1 = -(ru0 * tx + ru1 * ty + ru2 * tz)
-    b2 = v0 * tx + v1 * ty + v2 * tz
-    depth1 = b1 - a * b2
-    depth2 = b2 - a * b1
-    thr = min_depth * (1.0 - a * a)
-    return depth1 > thr and depth2 > thr
 
 
 @njit(cache=True, fastmath=True, inline='always')
@@ -212,15 +250,7 @@ def _cheirality_block(model, e, x1_x, x1_y, x2_x, x2_y, start, count,
         y = x1_y[i]
         xp = x2_x[i]
         yp = x2_y[i]
-        ex1_0 = e[0] * x + e[1] * y + e[2]
-        ex1_1 = e[3] * x + e[4] * y + e[5]
-        ex1_2 = e[6] * x + e[7] * y + e[8]
-        etx2_0 = e[0] * xp + e[3] * yp + e[6]
-        etx2_1 = e[1] * xp + e[4] * yp + e[7]
-        residual = xp * ex1_0 + yp * ex1_1 + ex1_2
-        denominator = (ex1_0 * ex1_0 + ex1_1 * ex1_1
-                       + etx2_0 * etx2_0 + etx2_1 * etx2_1)
-        r2 = residual * residual
+        r2, denominator = sampson_residual(e, x, y, xp, yp)
         if (denominator > 0.0 and r2 < max_error_sq * denominator
                 and cheirality_ok(model, x, y, xp, yp, MIN_DEPTH)):
             score += r2 / denominator

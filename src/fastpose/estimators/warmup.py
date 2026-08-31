@@ -276,10 +276,51 @@ def _warmup_steps(problem, iterations, lo_iterations,
     return steps
 
 
+def _cuda_warmup_steps(iterations, lo_iterations,
+                       final_refinement_iterations):
+    """Warmup steps for the CUDA backend, or `[]` when no device is usable.
+
+    The GPU kernels are cached on disk the same way the CPU ones are
+    (`cuda.jit(cache=True)`), so this buys the same thing `fastpose-warmup`
+    buys elsewhere. It matters more here than on the CPU: a cold GPU estimate
+    compiles the batched solver, the scorer and *two* LM kernels - one per
+    loss, since the RANSAC-internal local optimization and the final polish
+    pass use different ones - which is several seconds and is easy to mistake
+    for the steady-state cost when benchmarking.
+    """
+    from fastpose import cuda as cuda_backend
+    if not cuda_backend.is_available():
+        return []
+
+    x1, x2 = _synthetic_correspondences()
+    # a batch smaller than the point count keeps the warmup quick while still
+    # compiling every kernel the driver launches, including a partial round
+    return [("essential-cuda", lambda: estimate_relative_pose(
+        x1,
+        x2,
+        iterations=iterations,
+        min_iterations=iterations,
+        max_error=0.002,
+        seed=0,
+        lo_iterations=max(1, lo_iterations),
+        final_refinement_iterations=max(1, final_refinement_iterations),
+        device='cuda',
+        batch=64,
+    ))]
+
+
 def warmup(problem="all", iterations=3, lo_iterations=1,
-           final_refinement_iterations=1, progress=False):
-    steps = _warmup_steps(problem, iterations, lo_iterations,
-                          final_refinement_iterations)
+           final_refinement_iterations=1, progress=False, device="cpu"):
+    # device - 'cpu' (default) warms the numba CPU kernels, 'cuda' the GPU
+    #     ones, 'all' both. 'cuda' and 'all' are no-ops when no CUDA device is
+    #     available, so calling with 'all' is safe on a CPU-only machine.
+    steps = []
+    if device in ("cpu", "all"):
+        steps.extend(_warmup_steps(problem, iterations, lo_iterations,
+                                   final_refinement_iterations))
+    if device in ("cuda", "all") and problem in ("all", "essential"):
+        steps.extend(_cuda_warmup_steps(iterations, lo_iterations,
+                                        final_refinement_iterations))
     bar = tqdm(steps, desc="warming up", unit="kernel", disable=not progress)
     for label, run in bar:
         # before the call, not after: the postfix names the kernel currently
@@ -320,6 +361,15 @@ def main(argv=None):
              "pass is compiled per final_loss, so 0 leaves those kernels cold.",
     )
     parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda", "all"),
+        default="cpu",
+        help="Which backend's kernels to warm up. 'cuda' and 'all' are "
+             "no-ops when no CUDA device is available. The CUDA backend "
+             "currently covers the essential (calibrated relative pose) "
+             "problem only.",
+    )
+    parser.add_argument(
         "--no-progress",
         action="store_true",
         help="Do not draw the progress bar.",
@@ -328,7 +378,8 @@ def main(argv=None):
 
     start = time.perf_counter()
     warmup(args.problem, args.iterations, args.lo_iterations,
-           args.final_refinement_iterations, progress=not args.no_progress)
+           args.final_refinement_iterations, progress=not args.no_progress,
+           device=args.device)
     elapsed = time.perf_counter() - start
     print(f"fastpose warmup complete in {elapsed:.2f}s")
     return 0

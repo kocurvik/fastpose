@@ -155,8 +155,77 @@ def run_scaling_benchmark():
         print()
 
 
+def run_cuda_scaling_benchmark():
+    # CPU vs GPU over both axes the GPU driver is supposed to win on: match
+    # count and iteration budget. Both are swept because they trade off
+    # differently - match count makes each round more expensive, iteration
+    # count adds rounds, and only the second amortizes the fixed per-round
+    # launch and readback cost.
+    from fastpose import cuda as cuda_backend
+    if not cuda_backend.is_available():
+        print(f'no usable CUDA device: {cuda_backend.unavailable_reason()}')
+        return
+
+    max_error = 2.0  # pixels
+    focal = 1000.0
+    image_size = 2000.0
+    repeats = 3
+
+    # Warm both backends before timing anything. On the GPU this compiles the
+    # batched solver, the scorer and both LM kernels (one per loss); a single
+    # untimed call is not enough, which is easy to mistake for a slow GPU.
+    rng = np.random.default_rng(0)
+    x1_w, x2_w, _, _ = generate_relpose_data(rng, 500)
+    x1n_w = (x1_w - image_size / 2) / focal
+    x2n_w = (x2_w - image_size / 2) / focal
+    for device in ('cpu', 'cuda'):
+        for _ in range(2):
+            estimate_relative_pose(x1n_w, x2n_w, iterations=50,
+                                   min_iterations=50,
+                                   max_error=max_error / focal, seed=0,
+                                   device=device)
+
+    header = (f'{"matches":>8} {"iters":>7} | {"cpu":>9} {"cuda":>9} '
+              f'{"speedup":>8} | {"inl cpu":>8} {"inl gpu":>8} | '
+              f'{"err cpu":>8} {"err gpu":>8}')
+    print(header)
+    print('-' * len(header))
+
+    for num_samples in [2000, 16000, 50000]:
+        for iterations in [1000, 5000, 20000]:
+            rng = np.random.default_rng(0)
+            x1, x2, R_gt, t_gt = generate_relpose_data(
+                rng, num_samples, noise_sigma=0.5, outlier_ratio=0.3,
+                focal=focal, image_size=image_size)
+            x1n = (x1 - image_size / 2) / focal
+            x2n = (x2 - image_size / 2) / focal
+
+            results = {}
+            for device in ('cpu', 'cuda'):
+                times = []
+                for _ in range(repeats):
+                    start = time.perf_counter()
+                    model, est_info = estimate_relative_pose(
+                        x1n, x2n, iterations=iterations,
+                        min_iterations=iterations,
+                        max_error=max_error / focal, seed=0, device=device)
+                    times.append(time.perf_counter() - start)
+                err = max(rotation_error_deg(model['R'], R_gt),
+                          translation_error_deg(model['t'], t_gt))
+                results[device] = (min(times), est_info['num_inliers'], err)
+
+            cpu_t, cpu_inl, cpu_err = results['cpu']
+            gpu_t, gpu_inl, gpu_err = results['cuda']
+            print(f'{num_samples:>8} {iterations:>7} | {cpu_t * 1e3:8.1f}ms '
+                  f'{gpu_t * 1e3:8.1f}ms {cpu_t / gpu_t:7.2f}x | '
+                  f'{cpu_inl:>8} {gpu_inl:>8} | {cpu_err:8.4f} {gpu_err:8.4f}')
+        print()
+
+
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'scaling':
         run_scaling_benchmark()
+    elif len(sys.argv) > 1 and sys.argv[1] == 'cuda-scaling':
+        run_cuda_scaling_benchmark()
     else:
         evaluate_maa()
