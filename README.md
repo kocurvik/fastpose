@@ -182,9 +182,9 @@ A4000 Laptop against the single-threaded CPU driver:
 
 | matches | 1000 iters | 5000 iters | 20000 iters |
 |---|---|---|---|
-| 2 000 | 1.63× | 4.38× | 6.58× |
-| 16 000 | 3.67× | 8.09× | 12.90× |
-| 50 000 | 4.13× | 10.50× | 20.85× |
+| 2 000 | 1.75× | 4.48× | 7.02× |
+| 16 000 | 3.71× | 9.39× | 14.60× |
+| 50 000 | 4.21× | 10.59× | 24.54× |
 
 Reproduce with `python -m benchmarks.estimators.essential cuda-scaling`.
 
@@ -235,11 +235,12 @@ bit-comparable. In order of how much they matter:
   gate, not a candidate count, is what limits the budget: it lands at 6–37
   refinements over a 20 000-iteration run, the same order as the serial
   driver, and reaches the same inlier count.
-- **No early bail-out in scoring.** The CPU scorer abandons a model as soon as
-  its partial score exceeds the incumbent; a block reduction cannot. A model
-  the CPU driver would have abandoned comes back with a full inlier count,
-  which can select a different LO candidate — the same trade
-  `build_parallel_ransac` already makes.
+- **Scoring bails out against a round-stale bound.** The early bail-out is
+  kept — the truncated score is a sum of non-negative terms, so any partial
+  sum bounds the total, and the block re-reduces its running total between
+  geometrically growing chunks. What differs is the bound: every hypothesis of
+  a round bails against the incumbent as it stood when the round started, not
+  against a running one. Same staleness `build_parallel_ransac` accepts.
 - **Adaptive termination is evaluated per round**, so it can overshoot by up
   to one batch.
 - **A different RNG.** Runs are reproducible from `(seed, batch)` on a given

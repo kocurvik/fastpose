@@ -35,9 +35,10 @@ rather than rounding:
   is gone; the gate is what actually controls the local-optimization budget,
   and it lands within the serial driver's range on its own (6-37 refinements
   over 20000 iterations here, against the CPU path's identical inlier count).
-- **No early bail-out in scoring**, so a model the CPU driver would abandon
-  mid-scan comes back with a full inlier count. Same trade, and same
-  consequence, as `build_parallel_ransac`.
+- **Scoring bails out against a round-stale bound.** The bail-out itself is
+  kept (see cuda/scorers.py), but every hypothesis of a round is scored
+  against the best minimal score as it stood when the round *started*, not
+  against a running incumbent. Same staleness `build_parallel_ransac` accepts.
 - **Adaptive termination is evaluated per round**, so it can overshoot the
   serial driver by up to one batch.
 - **Sampling uses a different RNG.** Results are reproducible from
@@ -179,13 +180,13 @@ class CudaRansacEstimator():
 
     # -- one round ---------------------------------------------------------
 
-    def _round(self, num_points, count, max_error_sq):
+    def _round(self, num_points, count, max_error_sq, bound):
         _sample_kernel[(count + SAMPLE_THREADS - 1) // SAMPLE_THREADS,
                        SAMPLE_THREADS](self._rng, num_points, self._samples)
         solve_batch(self._device_data, self._samples[:count], self._models,
                     self._counts)
         score_batch(self._device_data32, self._models, self._counts,
-                    max_error_sq, self._score_buf, count)
+                    max_error_sq, self._score_buf, count, bound=bound)
         return self._score_buf.to_host(count)
 
     # -- driver ------------------------------------------------------------
@@ -253,8 +254,12 @@ class CudaRansacEstimator():
             count = min(remaining, round_batch)
             round_batch = min(round_batch * 2, self.batch)
 
+            # every hypothesis of the round is scored against the incumbent
+            # as it stood when the round started - the same staleness the
+            # parallel CPU driver accepts, and what makes the bail-out usable
+            # from a block reduction
             h_score, h_idx, h_inl, h_max_inl, h_max_idx = self._round(
-                num_points, count, max_error_sq)
+                num_points, count, max_error_sq, best_minimal_score)
             it += count
 
             valid = h_idx >= 0

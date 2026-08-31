@@ -195,10 +195,16 @@ Two properties to preserve, both already true of `cuda/scorers.py`:
 - Form the model-derived matrix (E, F) in **float64** from the float64 model and
   round it once, then run the per-point loop in float32.
 
-There is no early bail-out on the GPU — a block reduction cannot have one. This
-is the same trade `build_parallel_ransac` documents: a model the CPU driver
-abandons mid-scan comes back with a *full* inlier count, which can change which
-candidate local optimization sees.
+**Keep the early bail-out.** It looks impossible on a block reduction and is
+not: the truncated score sums non-negative terms, so any partial sum bounds the
+total. Score a chunk, re-reduce the *running* total, and let every thread read
+the same shared value — the decision is then block-uniform and the
+`syncthreads()` stay legal. Grow the chunks geometrically: a hopeless model
+almost always bails on the first one, so a small first chunk buys nearly all
+the saving while doubling keeps the reduction count logarithmic in `n`. Fixed
+512-point chunks cost 60% when the bail never fires; geometric ones cost ~18%
+at 16k matches and ~3% at 50k, against a 1.4-1.7x gain when it does. Bail
+against the best minimal score as of the round's start.
 
 **Verify.** Against the CPU scorer with `best_score=1e300` (which disables its
 bail-out). Assert inlier counts within 1, scores to `rtol=1e-5`, and — more

@@ -15,20 +15,24 @@ so the sum over all correspondences does not drift. Measured against a full
 float64 scorer on 200 real models at 16k matches, inlier counts agree on ~99.5%
 of models (worst case one point) and the model ranking is unchanged.
 
-Two further deliberate differences from `scorers/sampson.py`, both inherent to
-the parallel shape rather than choices:
+The early bail-out is kept, which is not obvious for a block reduction. The
+truncated score is a sum of non-negative terms, so any partial sum is a lower
+bound on the total: the block scores a chunk, re-reduces the running total, and
+every thread reads the same shared value, which makes the decision
+block-uniform and the `syncthreads()` legal. Chunks grow geometrically because
+a hopeless model almost always bails on the first one - see `_score_one`.
 
-- **No early bail-out.** The CPU scorer stops as soon as a partial truncated
-  score exceeds the incumbent, which is exact but strictly sequential. Here
-  every model is scored over every point. That is the same trade
-  `build_parallel_ransac` already makes and has the same consequence: a model
-  the CPU driver would have abandoned mid-scan comes back with a *full* inlier
-  count rather than a partial one, which can flip the `more_inliers` test and
-  select a different local-optimization candidate.
-- **Summation order.** A tree reduction adds the per-point contributions in a
-  different order than a sequential loop, so scores differ in the last couple
-  of ulps. Inlier *counts* are exact integers and agree exactly, except where
-  a point sits within rounding distance of the threshold.
+The remaining difference from `scorers/sampson.py` is **summation order**: a
+tree reduction adds the per-point contributions in a different order than a
+sequential loop, so scores differ in the last couple of ulps.
+
+One thing the bail-out inherits from the CPU scorer: a model that bails
+returns a *partial* score and a partial inlier count. Both are lower bounds,
+and a bailed-out model must not be compared on inlier count - it isn't,
+because its score already exceeds the incumbent, so it loses the score test
+first. What differs from the serial driver is only the bound: every hypothesis
+of a round bails against the incumbent as it stood when the round started,
+which is the same staleness `build_parallel_ransac` accepts.
 
 The per-point math itself is not reimplemented: `sampson_residual`,
 `essential_from_pose` and `cheirality_ok` come from the same factory in
@@ -52,48 +56,88 @@ _F64 = build_sampson_point_kernels(cuda_jit, real=float64)
 _essential_from_pose = _F64['essential_from_pose']
 
 # score reported for a model slot that holds no model (m >= counts[b]); the
-# same 1e300 failure sentinel the CPU kernels use, never inf
+# same 1e300 failure sentinel the CPU kernels use, never inf. Also the
+# "no bail-out" bound.
 NO_MODEL = 1e300
+
+# points scored between early-bail-out checks. Each check costs one block
+# reduction, so this trades bail-out latency against reduction overhead; 512
+# matches the CPU scorer's SCORE_CHUNK.
+SCORE_CHUNK = 512
 
 
 @cuda.jit(device=True, fastmath=True)
 def _score_one(x1_x, x1_y, x2_x, x2_y, pose, e, ss, sc, tid, nthreads,
-               max_error_sq, max_error_sq64):
+               max_error_sq, max_error_sq64, bound):
     # block-wide truncated Sampson + cheirality score of one pose model;
-    # returns (score, num_inliers) valid in thread 0 only.
+    # returns (score, num_inliers), valid in every thread after the reduction.
     #
     # Mixed precision: the coordinate columns, E, the pose and every per-point
     # expression are float32; `s` is float64, so the O(n) sum accumulates
     # without drift. The truncation constant is added in float64 for the same
     # reason - it is the term most points contribute.
+    #
+    # Early bail-out, the block-reduction analogue of the CPU scorer's: the
+    # truncated score only grows, so once the running total exceeds `bound`
+    # the model cannot win and the rest of the points need not be scored. The
+    # threads accumulate a chunk, re-reduce the running totals, and every
+    # thread reads the same shared value - so the decision is block-uniform
+    # and the syncthreads below stay legal. Pass bound = NO_MODEL to disable.
+    #
+    # Like the CPU scorer, a model that bails returns a *partial* score and a
+    # *partial* inlier count. Both are lower bounds on the true values, and
+    # the driver must not compare a bailed-out model on inlier count - which
+    # it does not, because a bailed-out score already exceeds the incumbent.
     n = x1_x.shape[0]
     s = 0.0
     c = 0
-    i = tid
-    while i < n:
-        x = x1_x[i]
-        y = x1_y[i]
-        xp = x2_x[i]
-        yp = x2_y[i]
-        r2, den = _sampson_residual(e, x, y, xp, yp)
-        if (den > float32(0.0) and r2 < max_error_sq * den
-                and _cheirality_ok(pose, x, y, xp, yp, float32(MIN_DEPTH))):
-            s += float64(r2 / den)
-            c += 1
-        else:
-            s += max_error_sq64
-        i += nthreads
-    ss[tid] = s
-    sc[tid] = c
-    cuda.syncthreads()
+    start = 0
+    chunk = SCORE_CHUNK
+    while start < n:
+        stop = start + chunk
+        if stop > n:
+            stop = n
+        i = start + tid
+        while i < stop:
+            x = x1_x[i]
+            y = x1_y[i]
+            xp = x2_x[i]
+            yp = x2_y[i]
+            r2, den = _sampson_residual(e, x, y, xp, yp)
+            if (den > float32(0.0) and r2 < max_error_sq * den
+                    and _cheirality_ok(pose, x, y, xp, yp, float32(MIN_DEPTH))):
+                s += float64(r2 / den)
+                c += 1
+            else:
+                s += max_error_sq64
+            i += nthreads
 
-    stride = nthreads // 2
-    while stride > 0:
-        if tid < stride:
-            ss[tid] += ss[tid + stride]
-            sc[tid] += sc[tid + stride]
+        # reduce the running totals, not just this chunk's, so ss[0] is the
+        # score over everything scored so far
+        ss[tid] = s
+        sc[tid] = c
         cuda.syncthreads()
-        stride //= 2
+        stride = nthreads // 2
+        while stride > 0:
+            if tid < stride:
+                ss[tid] += ss[tid + stride]
+                sc[tid] += sc[tid + stride]
+            cuda.syncthreads()
+            stride //= 2
+
+        if ss[0] >= bound:
+            return ss[0], sc[0]
+        start = stop
+        # Chunks grow geometrically. Each check costs a block reduction, and a
+        # hopeless model overwhelmingly bails on the *first* one, so a small
+        # first chunk buys almost all of the saving while doubling keeps the
+        # reduction count logarithmic in n rather than linear. At 16k matches
+        # that is 6 reductions instead of 31, which is what makes the bail-out
+        # cheap enough to be worth having when it never fires.
+        chunk += chunk
+        # the next chunk overwrites ss/sc; no thread may race into that while
+        # another is still reading ss[0] above
+        cuda.syncthreads()
     return ss[0], sc[0]
 
 
@@ -108,7 +152,7 @@ NUM_COLS = 5
 
 @cuda.jit(cache=True)
 def _score_batch_kernel(x1_x, x1_y, x2_x, x2_y, models, counts, max_error_sq,
-                        out):
+                        bound, out):
     # grid: one block per hypothesis. Reduces each hypothesis to its
     # best-by-score model and its best-by-inlier-count model, the two criteria
     # the CPU driver tracks separately (see build_ransac's best_minimal_*).
@@ -143,16 +187,22 @@ def _score_batch_kernel(x1_x, x1_y, x2_x, x2_y, models, counts, max_error_sq,
             e[tid] = float32(e64[tid])
         cuda.syncthreads()
 
+        # bail against the tighter of the round's incumbent and this sample's
+        # own best so far - the CPU driver likewise updates its bound between
+        # the several models one minimal sample yields
+        local_bound = bs if bs < bound else bound
         score, inliers = _score_one(x1_x, x1_y, x2_x, x2_y, pose, e, ss, sc,
-                                    tid, nthreads, mes32, max_error_sq)
-        if tid == 0:
-            if score < bs:
-                bs = score
-                bi = m
-                bn = inliers
-            if inliers > mi:
-                mi = inliers
-                mix = m
+                                    tid, nthreads, mes32, max_error_sq,
+                                    local_bound)
+        # tracked in every thread, not just thread 0, so `local_bound` above
+        # stays block-uniform on the next model
+        if score < bs:
+            bs = score
+            bi = m
+            bn = inliers
+        if inliers > mi:
+            mi = inliers
+            mix = m
         # the next model overwrites `pose`/`e`/`ss`/`sc`; no thread may race
         # ahead into that while others are still reducing
         cuda.syncthreads()
@@ -195,9 +245,15 @@ class ScoreBuffers():
 
 
 def score_batch(data32, models, counts, max_error_sq, buffers, batch,
-                stream=0):
+                bound=NO_MODEL, stream=0):
     # launches the batched scorer over `batch` hypotheses. `data32` is the
     # float32 coordinate columns; `models` stays float64.
+    #
+    # `bound` is the incumbent to bail out against - the driver passes the
+    # best *minimal* score as it stood at the start of the round, which is the
+    # batched analogue of the CPU driver's running bound. NO_MODEL disables
+    # the bail-out, which is what the refined-model scoring pass wants: there
+    # are only a handful of models and their true scores are needed.
     _score_batch_kernel[batch, THREADS_PER_BLOCK, stream](
         data32[0], data32[1], data32[2], data32[3], models, counts,
-        max_error_sq, buffers.out)
+        max_error_sq, bound, buffers.out)
