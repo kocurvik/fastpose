@@ -44,8 +44,17 @@ back to a user-wide cache directory on its own.
 
 Entries are keyed on the host CPU, the numba version and each source file's
 timestamp and size, so an upgrade recompiles rather than reusing stale code —
-but `pip` does not remove the superseded files, and they accumulate until the
-directory is deleted by hand.
+but `pip` does not remove the superseded files and they accumulate. To reclaim
+the space:
+
+```
+fastpose-clean-cache --dry-run   # report what would go
+fastpose-clean-cache             # delete it
+```
+
+It searches all three locations numba might have used and removes only
+`.nbi`/`.nbc` files, leaving `.pyc` and sources alone. The kernels recompile on
+next use, or run `fastpose-warmup` to rebuild them up front.
 
 ### Multiprocessing
 
@@ -321,6 +330,8 @@ src/fastpose/
                    absolute,absolute_focal,monodepth}.py the per-problem kernels
     kernel_cache.py  process-independent numba cache keys for the closure-
                    specialized kernels (what makes `fastpose-warmup` stick)
+    clean_cache.py   `fastpose-clean-cache`: deletes the cached kernels from
+                   whichever of numba's three locations they landed in
     jit_backend.py   the `jit(fastmath=, inline=)` decorator shim that lets one
                    kernel source compile for CPU (njit) or GPU (cuda.jit)
     cuda/          the CUDA backend, covering every problem above. cuda/ransac.py

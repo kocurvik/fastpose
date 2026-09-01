@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastpose"
-version = "0.1.0"
+version = "1.0.0"
 description = "Fast Python/Numba backend for robust relative pose estimation"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,16 +19,20 @@ dependencies = [
     "tqdm"
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
 
 [project.scripts]
 fastpose-warmup = "fastpose.estimators.warmup:main"
+fastpose-clean-cache = "fastpose.clean_cache:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

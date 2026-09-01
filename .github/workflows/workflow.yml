@@ -1,0 +1,96 @@
+name: Publish to PyPI
+
+# The file name matters: PyPI's trusted publisher for this project is
+# registered against `workflow.yml` in kocurvik/fastpose. Renaming this file
+# breaks publishing until the publisher on PyPI is updated to match.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build sdist and wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+
+      - name: Fail if anything but Python source got packaged
+        # A checkout is clean, so this should never fire in CI - it is here to
+        # catch a local `python -m build` in a working tree that has been used,
+        # where src/**/__pycache__ holds hundreds of MB of numba .nbc/.nbi
+        # kernels. Those are keyed to one CPU, OS and numba version and must
+        # never ship.
+        run: |
+          python - <<'PY'
+          import pathlib, sys, tarfile, zipfile
+
+          bad = []
+          for path in sorted(pathlib.Path('dist').iterdir()):
+              if path.suffix == '.whl':
+                  names = zipfile.ZipFile(path).namelist()
+              else:
+                  with tarfile.open(path) as archive:
+                      names = archive.getnames()
+              bad += [f'{path.name}: {n}' for n in names
+                      if '__pycache__' in n
+                      or n.endswith(('.nbc', '.nbi', '.pyc', '.so', '.pyd'))]
+
+          if bad:
+              print('compiled artefacts leaked into the distribution:')
+              print(*bad, sep='\n')
+              sys.exit(1)
+          print('clean: Python source only')
+          PY
+
+      - name: Check metadata
+        run: python -m twine check dist/*
+
+      - name: Smoke-test the wheel
+        run: |
+          python -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"   # import the installed package, not the source tree
+          python -c "
+          import importlib.metadata as md
+          import fastpose.estimators as e
+          print('fastpose', md.version('fastpose'))
+          assert hasattr(e, 'estimate_relative_pose')
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    # Only a published release uploads. `workflow_dispatch` still runs the
+    # build job above - build, source-only guard, twine check, wheel smoke
+    # test - so the button is a safe dry run rather than a way to push a
+    # release to PyPI by accident. `on.release.types` is already restricted to
+    # `published`, so testing the event name is enough.
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    # Trusted publishing: PyPI mints a short-lived token from this OIDC
+    # identity, so there is no API token to store. `id-token: write` is what
+    # lets the job request it.
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
