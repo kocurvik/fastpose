@@ -61,7 +61,7 @@ from numba import cuda
 from numba.cuda.random import (create_xoroshiro128p_states,
                                xoroshiro128p_uniform_float64)
 
-from fastpose.cuda.backend import THREADS_PER_BLOCK
+from fastpose.cuda.backend import THREADS_PER_BLOCK, quiet_low_occupancy
 from fastpose.cuda.lm import RefineBuffers, gather_candidates
 from fastpose.cuda.scoring import NO_MODEL, ScoreBuffers
 from fastpose.refiners.losses import TruncatedLoss
@@ -241,6 +241,7 @@ class CudaRansacEstimator():
 
     # -- driver ------------------------------------------------------------
 
+    @quiet_low_occupancy()
     def estimate(self, data, num_points, max_error, iterations=1000,
                  min_iterations=None, success_prob=0.9999, lo_iterations=25,
                  seed=None, loss=None, params=None):
@@ -413,6 +414,7 @@ class CudaRansacEstimator():
 
     # -- final polish ------------------------------------------------------
 
+    @quiet_low_occupancy()
     def final_refine(self, model, max_error_sq, num_iterations, loss):
         # robust-loss LM over the model's own inlier set, on device. Uses the
         # same kernel with relaxed_scale=1.0, which selects exactly the

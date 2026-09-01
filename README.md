@@ -198,6 +198,12 @@ cost:
 fastpose-warmup --device cuda        # --device all also warms the CPU kernels
 ```
 
+**Low-occupancy warnings.** Several launches are small by design (one block per
+local-optimization candidate, one thread per hypothesis when sampling and
+solving), so for the duration of an estimate the driver silences numba's
+`NumbaPerformanceWarning` about grids under 128 blocks. Nothing else is
+filtered.
+
 #### When it helps
 
 The GPU keeps thousands of hypotheses in flight, so it wins on **many
