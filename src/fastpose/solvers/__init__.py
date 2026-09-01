@@ -1,5 +1,6 @@
 from fastpose.solvers.essential import FivePointSolver
 from fastpose.solvers.fundamental import SevenPointSolver
+from fastpose.solvers.homography import FourPointSolver
 from fastpose.solvers.varying_focal import SevenPointVaryingFocalSolver
 from fastpose.solvers.shared_focal import SixPointSharedFocalSolver
 from fastpose.solvers.p3p import P3PSolver

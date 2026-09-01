@@ -3,9 +3,10 @@
 A fast Python backend for robust camera pose estimation inspired by [PoseLib](https://github.com/PoseLib/PoseLib). 
 This package was mostly vibe-coded using Claude Code.
 Fundamental/essential
-matrix, calibrated and uncalibrated relative pose (including shared- and
-varying-focal variants), absolute pose (P3P/P4Pf), and monocular-depth-assisted
-relative pose — all built on one [numba](https://numba.pydata.org/)-compiled
+matrix, homography, calibrated and uncalibrated relative pose (including shared-
+and varying-focal variants), absolute pose (P3P/P4Pf), and
+monocular-depth-assisted relative pose — all built on one
+[numba](https://numba.pydata.org/)-compiled
 LO-RANSAC engine and benchmarked against PoseLib (C++). Every problem also has
 a [CUDA backend](#gpu-cuda) that runs the whole estimate batched on the GPU.
 
@@ -30,9 +31,9 @@ front, run:
 fastpose-warmup
 ```
 
-Use `fastpose-warmup --problem fundamental` / `essential` / `absolute` /
-`absolute-focal` / `varying-focal` / `shared-focal` / `monodepth` to warm up
-only one backend (`monodepth` covers all four monodepth variants). Note that the warmup may take several minutes.
+Use `fastpose-warmup --problem fundamental` / `homography` / `essential` /
+`absolute` / `absolute-focal` / `varying-focal` / `shared-focal` / `monodepth`
+to warm up only one backend (`monodepth` covers all four monodepth variants). Note that the warmup may take several minutes.
 
 ### Where the compiled kernels go
 
@@ -95,7 +96,8 @@ for [threading](#threading)) and returns `(model, info)`:
 
 ```python
 import numpy as np
-from fastpose.estimators import estimate_fundamental, estimate_relative_pose, estimate_absolute_pose
+from fastpose.estimators import (estimate_fundamental, estimate_homography,
+                                 estimate_relative_pose, estimate_absolute_pose)
 
 # fundamental matrix (7-point): x1, x2 are pixel coordinates
 model, info = estimate_fundamental(x1, x2, iterations=1000, max_error=2.0)
@@ -111,6 +113,10 @@ R, t = model['R'], model['t']
 # absolute pose (P3P): x is normalized image points, X the 3D points
 model, info = estimate_absolute_pose(x, X, iterations=1000, max_error=2.0 / focal)
 R, t = model['R'], model['t']
+
+# homography (4-point DLT): x1, x2 are pixel coordinates, x2 ~ H x1
+model, info = estimate_homography(x1, x2, iterations=1000, max_error=3.0)
+H = model['H']
 ```
 
 ### API reference
@@ -122,6 +128,7 @@ correspondences raises `ValueError`.
 | Function | Input | `model` keys | min pts |
 |---|---|---|---|
 | `estimate_fundamental` | `x1, x2` pixel coords | `F` | 7 |
+| `estimate_homography` | `x1, x2` pixel coords | `H` | 4 |
 | `estimate_relative_pose` | `x1, x2` calibrated (or pixel + `camera1`/`camera2`) | `R, t` | 5 |
 | `estimate_relative_pose_with_varying_focals` | `x1, x2` pixel coords, optional `principal_point1`/`2` | `R, t, f1, f2` | 7 |
 | `estimate_relative_pose_with_shared_focal` | `x1, x2` pixel coords, optional `principal_point1`/`2` | `R, t, f` | 6 |
@@ -321,19 +328,21 @@ equations) and `apply_step` (retraction).
 
 ```
 src/fastpose/
-    solvers/       minimal solvers: 7-point F, 5-point E, 7-point varying-focal
-                   and 6-point shared-focal relative pose, P3P and P4Pf absolute
-                   pose, four 3-point monodepth relative pose variants; shared
-                   helpers in solvers/utils.py
+    solvers/       minimal solvers: 7-point F, 4-point DLT homography, 5-point E,
+                   7-point varying-focal and 6-point shared-focal relative pose,
+                   P3P and P4Pf absolute pose, four 3-point monodepth relative
+                   pose variants; shared helpers in solvers/utils.py
     scorers/       robust scorers: truncated Sampson (MSAC) for flat 3x3 models,
                    for pose models [R|t] (E = [t]_x R assembled on the fly), for
                    varying/shared-focal pose models [R|t|f1|f2] and for the
                    monodepth model layouts; truncated reprojection error for
-                   absolute pose models [R|t] and unknown-focal models [R|t|f]
+                   absolute pose models [R|t] and unknown-focal models [R|t|f];
+                   truncated symmetric transfer error for homographies
     refiners/      local optimization; refiners/lm.py is the generic LM engine,
                    refiners/utils.py the shared factorization/jacobian machinery,
-                   refiners/{fundamental,essential,varying_focal,shared_focal,
-                   absolute,absolute_focal,monodepth}.py the per-problem kernels
+                   refiners/{fundamental,homography,essential,varying_focal,
+                   shared_focal,absolute,absolute_focal,monodepth}.py the
+                   per-problem kernels
     kernel_cache.py  process-independent numba cache keys for the closure-
                    specialized kernels (what makes `fastpose-warmup` stick)
     clean_cache.py   `fastpose-clean-cache`: deletes the cached kernels from
@@ -413,6 +422,53 @@ The one deliberate removal is the shared-focal solver, below.
   coordinates.
 - Optional adaptive termination (`min_iterations < iterations`) with the
   standard inlier-ratio-based iteration bound.
+
+</details>
+
+<details>
+<summary>Homography (4-point DLT)</summary>
+
+`src/fastpose/solvers/homography.py` + `src/fastpose/scorers/transfer.py` +
+`src/fastpose/refiners/homography.py`:
+
+- **4-point DLT solver**: the 8x9 constraint matrix `x2 x (H x1) = 0`, whose
+  nullspace comes from Gaussian elimination with partial pivoting and
+  back-substitution with `H33` free — the same trade the 7-point solver makes
+  against a LAPACK SVD call. That free variable is degenerate only when the
+  first image's origin maps to infinity, which after the shared Hartley
+  normalization would mean the centroid of the correspondences leaving the
+  second image entirely. The model comes back at unit Frobenius norm, which is
+  what keeps the scorer's inverse well scaled.
+- **Symmetric transfer error scoring**,
+  `(d(x2, H x1)^2 + d(x1, H^-1 x2)^2) / 2`, truncated (MSAC) with the same
+  blocked early bail-out as the Sampson scorers. The two terms are *averaged*,
+  not summed, which is what keeps `max_error` the one-way pixel distance
+  poselib's `compute_homography_msac_score` and OpenCV's `findHomography`
+  threshold — a threshold ports across unchanged even though the functional
+  being minimized is the symmetric one. Over 12 scenes at 2000 matches the two
+  inlier sets agree on 98.7–100% of points at thresholds from 1 to 6 px. Both directions need `H^-1`, so the *derived form* the per-point
+  loop reads is 18 doubles (`H` then `H^-1`) rather than 9 — built once per
+  model in float64, which on the GPU is exactly the `prepare` contract the
+  batched scorer already had. The inlier test keeps its unnormalized form
+  (`numerator < threshold * denominator`), so no outlier pays a division.
+- **LM on the sphere**: `H` has 8 degrees of freedom in 9 entries and the
+  missing one is pure gauge. Rather than pin an entry (`H33 = 1`, which breaks
+  wherever that entry passes through zero), the state is the unit-norm flat
+  `H` and the 8 tangent parameters are an orthonormal basis of `h^perp` from a
+  single Householder reflector, with the retraction `h <- (h + B^T d) / ||.||`.
+  The basis is a deterministic function of `h`, so the jacobian and the
+  retraction cannot drift apart.
+- **Analytic backward jacobian.** The forward residual pair differentiates
+  like any projective transfer; the backward pair goes through
+  `d(H^-1) = -H^-1 dH H^-1`, which collapses to one rank-one outer product per
+  residual, `-(H^-T b)(H^-1 x2)^T`. That identity holds for the *true* inverse
+  only, which is why the derived form carries `H^-1 = adj(H)/det(H)` rather
+  than a renormalized inverse, and why a near-singular `H` is rejected outright
+  on the scale-invariant test `|det H| > 1e-12 ||H||_F ||adj H||_F`. Verified
+  against finite differences in `tests/jac/test_homography_jacobian.py`.
+- Local optimization refines over the whole correspondence set (the truncated
+  loss zeroes the outliers' weight), as the fundamental refiner does, and a
+  final Cauchy-loss polish runs on the RANSAC inliers.
 
 </details>
 

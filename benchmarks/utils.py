@@ -265,6 +265,79 @@ def generate_abspose_data(rng, num_samples, noise_sigma=1.0, outlier_ratio=0.2,
     return x, X, R, t
 
 
+def generate_homography_data(rng, num_samples, noise_sigma=1.0,
+                             outlier_ratio=0.2, focal=1000.0,
+                             image_size=2000.0, return_gt=False):
+    # synthetic two-view correspondences of a *planar* scene in pixel
+    # coordinates, so x2 ~ H x1 exactly: 3D points are drawn on a random
+    # plane in front of camera 1 and projected into both views. Noise is
+    # added in second-image pixels and outliers are drawn uniformly.
+    #
+    # The plane is tilted rather than fronto-parallel on purpose - a
+    # fronto-parallel plane with a small rotation gives an H that is nearly a
+    # similarity, which hides most of what a homography estimator does.
+    axis = rng.normal(size=3)
+    axis /= np.linalg.norm(axis)
+    angle = 0.25
+    K = skew(axis)
+    R = np.eye(3) + math.sin(angle) * K + (1.0 - math.cos(angle)) * (K @ K)
+    t = rng.normal(size=3)
+    t *= 0.5 / np.linalg.norm(t)
+
+    # plane n^T X = d in camera 1, tilted up to ~35 degrees off frontal
+    n = np.array([rng.uniform(-0.7, 0.7), rng.uniform(-0.7, 0.7), 1.0])
+    n /= np.linalg.norm(n)
+    d = 6.0
+
+    x1n = np.empty((0, 2))
+    x2n = np.empty((0, 2))
+    while len(x1n) < num_samples:
+        m = 2 * num_samples
+        xn = rng.uniform(-0.45, 0.45, size=(m, 2))
+        rays = np.column_stack([xn, np.ones(m)])
+        # depth of the ray-plane intersection
+        denom = rays @ n
+        depth = np.divide(d, denom, out=np.zeros(m), where=np.abs(denom) > 1e-6)
+        X = rays * depth[:, None]
+        X2 = X @ R.T + t
+        proj = X2[:, :2] / X2[:, 2:3]
+        valid = ((depth > 0.5) & (X2[:, 2] > 0.5)
+                 & (np.abs(proj[:, 0]) < 0.48) & (np.abs(proj[:, 1]) < 0.48))
+        x1n = np.concatenate([x1n, xn[valid]])
+        x2n = np.concatenate([x2n, proj[valid]])
+    x1n = x1n[:num_samples]
+    x2n = x2n[:num_samples]
+
+    c = image_size / 2.0
+    x1 = focal * x1n + c
+    x2 = focal * x2n + c
+    x2 += rng.normal(scale=noise_sigma, size=x2.shape)
+
+    num_outliers = int(num_samples * outlier_ratio)
+    inlier_mask = np.ones(num_samples, dtype=np.bool_)
+    if num_outliers:
+        outlier_idxs = rng.choice(num_samples, num_outliers, replace=False)
+        inlier_mask[outlier_idxs] = False
+        x2[outlier_idxs] = rng.uniform(0.0, image_size, size=(num_outliers, 2))
+
+    if return_gt:
+        # H in pixel coordinates: K (R - t n^T / d) K^-1
+        Kmat = np.array([[focal, 0.0, c], [0.0, focal, c], [0.0, 0.0, 1.0]])
+        H = Kmat @ (R + np.outer(t, n) / d) @ np.linalg.inv(Kmat)
+        return x1, x2, H / np.linalg.norm(H), inlier_mask
+    return x1, x2
+
+
+def generate_exact_homography_sample(rng, num_samples=4, focal=1000.0,
+                                     image_size=2000.0):
+    # noise-free correspondences of a planar scene plus the ground-truth
+    # pixel homography (unit Frobenius norm)
+    x1, x2, H, _ = generate_homography_data(
+        rng, num_samples, noise_sigma=0.0, outlier_ratio=0.0, focal=focal,
+        image_size=image_size, return_gt=True)
+    return x1, x2, H
+
+
 def generate_exact_fundamental_sample(rng, num_samples=7):
     # noise-free correspondences in [-1, 1]^2 for a random rank-2 F
     F = _random_rank2_f(rng)
@@ -313,6 +386,15 @@ def max_algebraic_residual(model, x1, x2):
     x1h = np.column_stack([x1, ones])
     x2h = np.column_stack([x2, ones])
     return float(np.max(np.abs(np.sum(x2h * (x1h @ F.T), axis=1))))
+
+
+def max_transfer_residual(model, x1, x2):
+    # max symmetric transfer distance over the sample for a flat homography;
+    # inf if the model is unusable (the scorer's own degeneracy test)
+    from fastpose.scorers.transfer import symmetric_transfer_errors_numpy
+    errors = symmetric_transfer_errors_numpy(np.asarray(model).reshape(3, 3),
+                                             x1, x2)
+    return float(np.sqrt(np.max(errors)))
 
 
 def report_runtime(label, times_s):

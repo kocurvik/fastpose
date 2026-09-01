@@ -21,6 +21,7 @@ from fastpose.refiners.monodepth import (LMMonoDepthPoseRefiner,
 # problem name -> the estimator module that owns its final-polish refiner
 POSE_PROBLEMS = {
     'fundamental': 'fastpose.estimators.fundamental',
+    'homography': 'fastpose.estimators.homography',
     'essential': 'fastpose.estimators.essential',
     'absolute': 'fastpose.estimators.absolute',
     'absolute-focal': 'fastpose.estimators.absolute_focal',

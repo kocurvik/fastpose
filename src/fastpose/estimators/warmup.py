@@ -20,6 +20,7 @@ from fastpose.estimators.absolute import estimate_absolute_pose
 from fastpose.estimators.absolute_focal import estimate_absolute_pose_with_focal
 from fastpose.estimators.essential import estimate_relative_pose
 from fastpose.estimators.fundamental import estimate_fundamental
+from fastpose.estimators.homography import estimate_homography
 from fastpose.estimators.monodepth import (
     estimate_relative_pose_with_monodepth,
     estimate_shared_focal_relative_pose_with_monodepth,
@@ -104,6 +105,29 @@ def _synthetic_correspondences(num_points=32):
     return np.ascontiguousarray(x1), np.ascontiguousarray(x2)
 
 
+def _synthetic_planar_correspondences(num_points=32):
+    """Pixel correspondences of a *planar* scene, for the homography warmup.
+
+    `_synthetic_correspondences` draws points at random depths, which no
+    homography relates - the 4-point solver would run but never find a model
+    with enough inliers to trigger local optimization or the final polish, and
+    those kernels would silently stay cold. These lie on one tilted plane, so
+    an exact homography exists.
+    """
+    rng = np.random.default_rng(0)
+    x1 = rng.uniform(-0.4, 0.4, size=(num_points, 2))
+    n = np.array([0.3, -0.2, 1.0])
+    n /= np.linalg.norm(n)
+    d = 5.0
+    R, t = _synthetic_pose()
+    H = R + np.outer(t, n) / d
+    x1h = np.column_stack([x1, np.ones(num_points)])
+    x2h = x1h @ H.T
+    x2 = x2h[:, :2] / x2h[:, 2:3]
+    return (np.ascontiguousarray(x1 * 1000.0 + 500.0),
+            np.ascontiguousarray(x2 * 1000.0 + 500.0))
+
+
 def _synthetic_pose():
     # the (R, t) `_synthetic_correspondences` generates its second view with
     angle = np.deg2rad(4.0)
@@ -174,6 +198,21 @@ def _warmup_steps(problem, iterations, lo_iterations,
             max_error=2.0,
             seed=0,
             lo_iterations=lo_iterations,
+        )))
+
+    if selected("homography"):
+        # a planar scene, so the 4-point solver has a homography to find and
+        # the local-optimization and polish kernels are actually reached
+        h_x1, h_x2 = _synthetic_planar_correspondences()
+        steps.append(("homography", lambda: estimate_homography(
+            h_x1,
+            h_x2,
+            iterations=iterations,
+            min_iterations=iterations,
+            max_error=2.0,
+            seed=0,
+            lo_iterations=lo_iterations,
+            final_refinement_iterations=final_refinement_iterations,
         )))
 
     if selected("essential"):
@@ -359,6 +398,11 @@ def _cuda_warmup_steps(problem, iterations, lo_iterations,
             x1 * 1000.0 + 500.0, x2 * 1000.0 + 500.0, max_error=2.0,
             **common)))
 
+    if selected("homography"):
+        h_x1, h_x2 = _synthetic_planar_correspondences()
+        steps.append(("homography-cuda", lambda: estimate_homography(
+            h_x1, h_x2, max_error=2.0, **common)))
+
     if selected("varying-focal"):
         steps.append(("varying-focal-cuda",
                       lambda: estimate_relative_pose_with_varying_focals(
@@ -422,9 +466,9 @@ def main(argv=None):
     )
     parser.add_argument(
         "--problem",
-        choices=("all", "fundamental", "essential", "absolute",
-                 "absolute-focal", "varying-focal", "shared-focal",
-                 "monodepth"),
+        choices=("all", "fundamental", "homography", "essential",
+                 "absolute", "absolute-focal", "varying-focal",
+                 "shared-focal", "monodepth"),
         default="all",
         help="Subset of kernels to warm up.",
     )

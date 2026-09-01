@@ -15,6 +15,7 @@ _MODULES = {
     'absolute': 'absolute',
     'absolute-focal': 'absolute_focal',
     'fundamental': 'fundamental',
+    'homography': 'homography',
     'varying-focal': 'varying_focal',
     'shared-focal': 'shared_focal',
     'monodepth': 'monodepth',

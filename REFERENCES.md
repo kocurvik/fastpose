@@ -62,6 +62,25 @@ Hartley-style isotropic point normalization used for numerical conditioning:
 }
 ```
 
+## Homography (4-point DLT)
+
+`src/fastpose/solvers/homography.py` uses the normalized Direct Linear
+Transform, and `src/fastpose/scorers/transfer.py` the symmetric transfer
+error; both are standard and are stated in:
+
+```bibtex
+@book{hartley2003multiple,
+  title     = {Multiple View Geometry in Computer Vision},
+  author    = {Hartley, Richard and Zisserman, Andrew},
+  edition   = {2nd},
+  year      = {2003},
+  publisher = {Cambridge University Press}
+}
+```
+
+The same Hartley-style isotropic normalization cited under the fundamental
+matrix above is what conditions the DLT system.
+
 ## Calibrated relative pose (5-point)
 
 `src/fastpose/solvers/essential.py` follows the nullspace + action-matrix
