@@ -31,12 +31,13 @@ import numpy as np
 import pytest
 
 from benchmarks.utils import (generate_abspose_data, generate_data,
+                              generate_homography_data,
                               generate_monodepth_relpose_data,
                               generate_relpose_data,
                               generate_shared_focal_relpose_data,
                               generate_varying_focal_relpose_data,
-                              max_algebraic_residual, rotation_error_deg,
-                              translation_error_deg)
+                              max_algebraic_residual, max_transfer_residual,
+                              rotation_error_deg, translation_error_deg)
 from fastpose import cuda as cuda_backend
 
 pytestmark = pytest.mark.skipif(
@@ -217,6 +218,29 @@ def _fundamental_case(seed, n, noise, outliers):
                 LMFundamentalRefiner(), error)
 
 
+def _homography_case(seed, n, noise, outliers):
+    from fastpose.estimators.utils import normalize_points, point_columns
+    from fastpose.refiners.homography import LMHomographyRefiner
+    from fastpose.scorers.transfer import symmetric_transfer_score
+    from fastpose.solvers.homography import FourPointSolver, _solve_h4p
+
+    rng = np.random.default_rng(seed)
+    x1, x2 = generate_homography_data(rng, n, noise_sigma=noise,
+                                      outlier_ratio=outliers, focal=FOCAL,
+                                      image_size=IMAGE_SIZE)
+    x1n, x2n, _, scale = normalize_points(x1, x2)
+    cols = point_columns(x1n, x2n)
+
+    def error(m):
+        # there is no pose to compare here; on a noiseless scene the recovered
+        # H must transfer every correspondence onto its match, both ways
+        return max_transfer_residual(m, x1n, x2n)
+
+    return Case('homography', cols, cols, None, (2.0 * scale) ** 2,
+                FourPointSolver, _solve_h4p, symmetric_transfer_score,
+                LMHomographyRefiner(), error)
+
+
 def _varying_focal_case(seed, n, noise, outliers):
     from fastpose.estimators.utils import normalize_points, point_columns
     from fastpose.refiners.utils import LO_INLIER_SCALE
@@ -388,6 +412,7 @@ BUILDERS = {
     'absolute': _absolute_case,
     'absolute-focal': _absolute_focal_case,
     'fundamental': _fundamental_case,
+    'homography': _homography_case,
     'varying-focal': _varying_focal_case,
     'shared-focal': _shared_focal_case,
 }
@@ -746,6 +771,14 @@ def _estimate_pair(name, iterations=2000):
         args = (x1, x2)
         kwargs['max_error'] = 2.0
         fn, gt = estimate_fundamental, None
+    elif name == 'homography':
+        from fastpose.estimators.homography import estimate_homography
+        x1, x2 = generate_homography_data(rng, 3000, noise_sigma=0.5,
+                                          outlier_ratio=0.3, focal=FOCAL,
+                                          image_size=IMAGE_SIZE)
+        args = (x1, x2)
+        kwargs['max_error'] = 2.0
+        fn, gt = estimate_homography, None
     elif name == 'varying-focal':
         from fastpose.estimators.varying_focal import \
             estimate_relative_pose_with_varying_focals

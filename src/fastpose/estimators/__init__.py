@@ -1,5 +1,6 @@
 from fastpose.estimators.ransac import RansacEstimator, build_ransac
 from fastpose.estimators.fundamental import estimate_fundamental_numpy, estimate_fundamental
+from fastpose.estimators.homography import estimate_homography
 from fastpose.estimators.essential import estimate_relative_pose, motion_from_essential
 from fastpose.estimators.varying_focal import estimate_relative_pose_with_varying_focals
 from fastpose.estimators.shared_focal import estimate_relative_pose_with_shared_focal

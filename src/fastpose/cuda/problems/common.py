@@ -14,14 +14,17 @@ from numba import float32, float64
 
 from fastpose.cuda.backend import cuda_jit
 from fastpose.refiners.absolute import build_reprojection_primitives
+from fastpose.refiners.homography import build_homography_primitives
 from fastpose.refiners.monodepth import (build_monodepth_primitives,
                                          build_monodepth_reproj_kernels,
                                          build_monodepth_residual_kernels)
 from fastpose.refiners.utils import build_refiner_primitives
 from fastpose.scorers.reprojection import build_reprojection_point_kernels
 from fastpose.scorers.sampson import build_sampson_point_kernels
+from fastpose.scorers.transfer import build_transfer_point_kernels
 from fastpose.solvers.essential import build_five_point_kernels
 from fastpose.solvers.fundamental import build_seven_point_kernels
+from fastpose.solvers.homography import build_four_point_kernels
 from fastpose.solvers.p3p import build_p3p_kernels
 from fastpose.solvers.p4pf import build_p4pf_kernels
 from fastpose.solvers.shared_focal import build_shared_focal_kernels
@@ -39,6 +42,18 @@ PRIM64 = build_refiner_primitives(cuda_jit, real=float64)
 # float32: the per-point Sampson jacobian, which is the O(n) work
 PRIM32 = build_refiner_primitives(cuda_jit, real=float32)
 
+# --- homography -----------------------------------------------------------
+# float32 per-point symmetric transfer residual; float64 for the one-per-model
+# inverse the derived form carries (a difference of products, so forming it in
+# float32 would lose digits the per-point loop never gets back)
+TRANSFER32 = build_transfer_point_kernels(cuda_jit, real=float32)
+TRANSFER64 = build_transfer_point_kernels(cuda_jit, real=float64)
+
+# float64: the sphere retraction and its tangent basis, both O(1) per LM step
+HOMOG64 = build_homography_primitives(cuda_jit, real=float64)
+# float32: the per-point symmetric transfer jacobian, which is the O(n) work
+HOMOG32 = build_homography_primitives(cuda_jit, real=float32)
+
 # --- reprojection ---------------------------------------------------------
 REPROJ32 = build_reprojection_point_kernels(cuda_jit, real=float32)
 REPROJ64 = build_reprojection_point_kernels(cuda_jit, real=float64)
@@ -53,6 +68,7 @@ REPROJ_FOCAL_JAC32 = build_reprojection_primitives(cuda_jit, real=float32,
 FIVE_POINT = build_five_point_kernels(cuda_jit)
 REAL_ROOTS_STURM = FIVE_POINT['real_roots_sturm']
 SEVEN_POINT = build_seven_point_kernels(cuda_jit)
+FOUR_POINT = build_four_point_kernels(cuda_jit)
 
 # The monodepth solvers borrow from three more chains: P3P (the calibrated
 # variant *is* a P3P on depth-induced 3D points), P4Pf (its 3xn null-space

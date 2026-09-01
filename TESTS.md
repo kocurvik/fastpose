@@ -26,6 +26,9 @@ asserted to match exactly.
 
 ```
 python -m benchmarks.estimators.fundamental            # mAA vs runtime plot
+python -m benchmarks.estimators.homography             # transfer-error mAA plot
+python -m benchmarks.estimators.homography scaling     # runtime scaling table
+python -m benchmarks.estimators.homography cuda-scaling  # CPU vs GPU
 python -m benchmarks.estimators.essential
 python -m benchmarks.estimators.absolute
 python -m benchmarks.estimators.fundamental scaling    # runtime scaling table
