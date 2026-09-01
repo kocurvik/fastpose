@@ -999,7 +999,11 @@ def test_cuda_warmup_covers_every_ported_problem():
     from fastpose.estimators.warmup import _cuda_warmup_steps
 
     steps = _cuda_warmup_steps('all', 3, 1, 1)
-    assert {label for label, _ in steps} == {f'{n}-cuda' for n in PROBLEMS}
+    # one step per problem, plus the one that covers the monodepth polish
+    # kernels the per-problem calls cannot reach (see the next test)
+    assert ({label for label, _ in steps}
+            == {f'{n}-cuda' for n in PROBLEMS}
+            | {'monodepth-final-refiners-cuda'})
 
 
 def test_cuda_warmup_reaches_the_final_polish_kernel():
@@ -1017,3 +1021,26 @@ def test_cuda_warmup_reaches_the_final_polish_kernel():
         built = set(get_problem(name)._lm_kernels)
         assert TruncatedLoss in built, f"{name}: no local-optimization kernel"
         assert CauchyLoss in built, f"{name}: final polish kernel left cold"
+
+
+def test_cuda_warmup_covers_every_selectable_monodepth_final_loss():
+    # The monodepth entry points are the only ones that let the caller pick
+    # the polish pass's loss, and `CudaProblem.lm_kernel` memoizes one kernel
+    # per loss *type*. The per-problem estimate calls only reach the default
+    # one, so asserting Cauchy alone (above) passed while
+    # `final_loss='truncated_cauchy'` still compiled its kernel on the call -
+    # the exact cache race the warmup exists to prevent. Its CPU counterpart
+    # is test_warmup.py's monodepth check.
+    from fastpose.cuda.registry import get_problem
+    from fastpose.estimators.warmup import (MONODEPTH_FINAL_LOSSES,
+                                            _cuda_warmup_steps)
+    from fastpose.refiners.losses import LOSSES
+
+    for label, run in _cuda_warmup_steps('monodepth', 3, 1, 1):
+        run()
+    expected = {LOSSES[name] for name in MONODEPTH_FINAL_LOSSES}
+    for name in (n for n in PROBLEMS if n.startswith('monodepth')):
+        missing = expected - set(get_problem(name)._lm_kernels)
+        assert not missing, (
+            "%s: warmup left these polish kernels cold: %s"
+            % (name, sorted(c.__name__ for c in missing)))

@@ -84,6 +84,36 @@ def _warm_monodepth_final_refiners(x1, x2, depth1, depth2, R, t,
                            num_iterations)
 
 
+def _warm_monodepth_final_refiners_cuda(x1, x2, depth1, depth2, common):
+    """Compile the GPU final-polish LM kernel for every selectable `final_loss`.
+
+    The mirror of `_warm_monodepth_final_refiners`, and it exists for the same
+    reason: the monodepth entry points are the only ones whose final polish
+    pass takes a caller-chosen loss, `CudaProblem.lm_kernel` memoizes one
+    kernel per loss *type*, and the estimator calls above only ever reach the
+    loss they were called with - the default. Without this,
+    `final_loss='truncated_cauchy'` with `device='cuda'` compiled its kernel on
+    the call, which is exactly the cache race the warmup exists to prevent.
+
+    Unlike the CPU version this drives the *estimators* rather than the
+    refiners. `CudaRansacEstimator.final_refine` needs the device buffers that
+    `estimate` allocates, so there is nothing to call it on in isolation - and
+    it is not needed: all four GPU estimates reach the polish pass on this
+    scene, where the CPU shift and varying-focal ones find no inliers and do
+    not (see the note over there).
+    """
+    for final_loss in MONODEPTH_FINAL_LOSSES:
+        kwargs = dict(common, final_loss=final_loss)
+        for estimate_shift in (False, True):
+            estimate_relative_pose_with_monodepth(
+                x1, x2, depth1, depth2, estimate_shift=estimate_shift,
+                max_error=0.002, **kwargs)
+        estimate_shared_focal_relative_pose_with_monodepth(
+            x1 * 1000.0, x2 * 1000.0, depth1, depth2, max_error=2.0, **kwargs)
+        estimate_varying_focal_relative_pose_with_monodepth(
+            x1 * 1000.0, x2 * 1000.0, depth1, depth2, max_error=2.0, **kwargs)
+
+
 def _synthetic_correspondences(num_points=32):
     rng = np.random.default_rng(0)
     points = np.empty((num_points, 3), dtype=np.float64)
@@ -354,7 +384,10 @@ def _cuda_warmup_steps(problem, iterations, lo_iterations,
     compiles the batched solver, the scorer and *two* LM kernels - one per
     loss, since the RANSAC-internal local optimization and the final polish
     pass use different ones - which is several seconds and is easy to mistake
-    for the steady-state cost when benchmarking.
+    for the steady-state cost when benchmarking. The monodepth problems take a
+    caller-chosen `final_loss` and so have one polish kernel per loss rather
+    than one; `_warm_monodepth_final_refiners_cuda` covers the rest of them,
+    which is why the GPU list is one step longer than one per problem.
 
     `lo_iterations` and `final_refinement_iterations` are floored at 1: a zero
     skips the pass entirely and leaves its kernel cold, which is the one thing
@@ -436,6 +469,11 @@ def _cuda_warmup_steps(problem, iterations, lo_iterations,
                       lambda: estimate_varying_focal_relative_pose_with_monodepth(
                           x1 * 1000.0, x2 * 1000.0, depth1, depth2,
                           max_error=2.0, **common)))
+        # one LM kernel is compiled per `final_loss` here too, and the calls
+        # above only reach the default one
+        steps.append(("monodepth-final-refiners-cuda",
+                      lambda: _warm_monodepth_final_refiners_cuda(
+                          x1, x2, depth1, depth2, common)))
 
     return steps
 
