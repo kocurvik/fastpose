@@ -484,6 +484,20 @@ def build_sampson_accumulate(loss):
     # exactly the old hard truncation, so the skip-heavy-work fast path is
     # preserved). `loss` is bound as a compile-time constant, the same
     # closure pattern build_lm_refine uses for its own kernels.
+    #
+    # This loop stays serial, and that is a measured choice rather than an
+    # oversight. It is the O(n) half of every LM step and therefore most of
+    # what local optimization and the final polish cost, both of which are
+    # serial tails in the parallel RANSAC driver - so splitting it across
+    # threads looks like the obvious win. In a tight loop it is: as a chunked
+    # prange reduction it measured 2.4-2.6x on 4 threads at 16k points. In the
+    # LM it is not. Each accumulation is separated from the next by the cost
+    # evaluation, the Cholesky solve and the retraction, so the thread pool
+    # sleeps in between and every call pays a wake-up. Measured through the LO
+    # refiner at 16k points, one refine went 1.73 ms serial -> 2.0 ms on 4
+    # threads -> 2.3 ms on 8: a consistent net loss at every thread count.
+    # Parallelize an LM inner loop only with a benchmark that calls it the way
+    # the LM does, not one that calls it back to back.
     weight_fn = loss.weight
 
     @njit(cache=True, fastmath=True)

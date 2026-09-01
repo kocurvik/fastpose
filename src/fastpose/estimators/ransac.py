@@ -33,13 +33,29 @@ There are two drivers. `build_ransac` is the serial one and stays the
 default. `build_parallel_ransac` draws hypotheses in batches and spreads
 their solve+score across numba threads; `RansacEstimator.estimate` selects
 it when `num_threads > 1`. It trades exact agreement with the serial driver
-for wall-clock. Measured on 8 physical cores at a 1000-iteration budget:
-1.7-2.8x end to end, the smaller figure at large point counts. The batched
-loop itself scales about 3.5-4x; local optimization and the final
-refinement stay serial and cap the rest, and they cost more as the inlier
-count grows, which is why 16k matches gain less than 2k. Threading buys
-latency on a single estimate and nothing on throughput - a caller already
-running one process per core should leave it off.
+for wall-clock.
+
+What scales and what does not is worth being explicit about, because it sets
+the ceiling. The batched solve+score loop scales about 3.5-4x on 8 cores.
+Local optimization and the final polish do not run in the batch at all - they
+are serial tails - and both are O(matches) per LM step, so they get *more*
+expensive as the inlier ratio rises. Measured at 16k matches over a
+1000-iteration budget: the loop is ~47% of a serial call at a 90% inlier
+ratio and the two tails are the rest, which caps the whole estimate near
+1.9x however many cores it gets, and 1.2-1.4x is what 4 threads actually
+deliver. At 2k matches, or at inlier ratios near 50% where the scoring
+bail-out keeps the tails cheap, the loop dominates instead and 4 threads
+reach 2.4-2.9x.
+
+So the inlier ratio, not the core count, is what decides whether threading
+helps. The tails resist further attack: refining one candidate per batch
+rather than one per improving hypothesis (see `build_parallel_ransac`) trims
+them a little, and parallelizing the LM normal-equation accumulation inside
+them measured *slower* rather than faster - see the note in
+`refiners/utils.py` before trying it again.
+
+Threading buys latency on a single estimate and nothing on throughput - a
+caller already running one process per core should leave it off.
 """
 
 import math
@@ -207,16 +223,27 @@ def build_parallel_ransac(solve_fn, score_fn, refine_fn, sample_size,
     # the same order no matter how many threads run - results depend on the
     # batch size but never on the thread count.
     #
-    # It is NOT bit-identical to the serial driver, and cannot be: every
-    # hypothesis in a batch is scored against `best_minimal_score` as it stood
-    # when the batch started rather than against the running value, so models
-    # the serial driver bails out on may be scored in full here. A full score
-    # carries a true inlier count where a bailed-out one carries a partial
-    # count, which can flip the `more_inliers` test and pick a different LO
-    # candidate. Everything downstream of scoring - the tracker updates, the
-    # LO trigger, the adaptive iteration count and the final refinement -
-    # is merged back in hypothesis order and mirrors the serial driver
-    # exactly.
+    # It is NOT bit-identical to the serial driver, and cannot be, for two
+    # reasons.
+    #
+    # First, every hypothesis in a batch is scored against `best_minimal_score`
+    # as it stood when the batch started rather than against the running value,
+    # so models the serial driver bails out on may be scored in full here. A
+    # full score carries a true inlier count where a bailed-out one carries a
+    # partial count, which can flip the `more_inliers` test.
+    #
+    # Second, local optimization runs **once per batch** rather than once per
+    # improving hypothesis. The gate is the serial driver's - a minimal model
+    # is worth refining only if it improves the best minimal score or inlier
+    # count - and the best-scoring hypothesis that passes it is the one
+    # refined. This is what cuda/ransac.py does per round, for the same reason:
+    # LO is an O(matches) LM refit plus a full score, it stays serial in this
+    # driver no matter how many threads the batch used, and at high inlier
+    # ratios it is most of the call. Refining every improver bought nothing
+    # measurable over refining the best one.
+    #
+    # The tracker updates, the incumbent and the adaptive iteration count are
+    # still merged back in hypothesis order and mirror the serial driver.
     stabilize(solve_fn, score_fn, refine_fn)
 
     @njit(cache=True, parallel=True)
@@ -285,11 +312,16 @@ def build_parallel_ransac(solve_fn, score_fn, refine_fn, sample_size,
                     scores[q, m] = s
                     inlier_counts[q, m] = k
 
-            # merge in hypothesis order, applying the serial driver's logic
+            # Merge in hypothesis order. The minimal trackers and the incumbent
+            # are updated exactly as the serial driver updates them, but local
+            # optimization is deferred: the batch runs it once, on the
+            # best-scoring hypothesis that qualified anywhere in the batch.
+            lo_q = -1
+            lo_m = -1
+            lo_best_score = 1e300
+            any_candidate = False
             for q in range(batch):
                 it += 1
-                lo_candidate = -1
-                lo_candidate_inliers = 0
                 for m in range(counts[q]):
                     score = scores[q, m]
                     num_inliers = inlier_counts[q, m]
@@ -301,8 +333,11 @@ def build_parallel_ransac(solve_fn, score_fn, refine_fn, sample_size,
                         best_minimal_num_inliers = num_inliers
                     if better_score:
                         best_minimal_score = score
-                    lo_candidate = m
-                    lo_candidate_inliers = num_inliers
+                    any_candidate = True
+                    if num_inliers > sample_size and score < lo_best_score:
+                        lo_q = q
+                        lo_m = m
+                        lo_best_score = score
 
                     if score < best_score:
                         best_score = score
@@ -310,31 +345,35 @@ def build_parallel_ransac(solve_fn, score_fn, refine_fn, sample_size,
                         for j in range(num_params):
                             best_model[j] = models[q, m, j]
 
-                if lo_candidate >= 0:
-                    if lo_iterations > 0 and lo_candidate_inliers > sample_size:
-                        if refine_fn(data, models[q, lo_candidate], refined,
-                                     max_error_sq, lo_iterations):
-                            lo_score, lo_num_inliers = score_fn(
-                                refined, data, max_error_sq, best_score)
-                            if lo_score < best_score:
-                                best_score = lo_score
-                                best_num_inliers = lo_num_inliers
-                                for j in range(num_params):
-                                    best_model[j] = refined[j]
+            if lo_iterations > 0 and lo_q >= 0:
+                if refine_fn(data, models[lo_q, lo_m], refined,
+                             max_error_sq, lo_iterations):
+                    lo_score, lo_num_inliers = score_fn(
+                        refined, data, max_error_sq, best_score)
+                    if lo_score < best_score:
+                        best_score = lo_score
+                        best_num_inliers = lo_num_inliers
+                        for j in range(num_params):
+                            best_model[j] = refined[j]
 
-                    eps = best_num_inliers / num_points
-                    if eps > 0.0:
-                        eps_k = eps ** sample_size
-                        if eps_k >= 1.0:
-                            dyn_max_iterations = 0
-                        elif eps_k > 0.0:
-                            log_success_fail = math.log(1.0 - eps_k)
-                            if log_success_fail < 0.0:
-                                dyn_max_iterations = int(log_fail / log_success_fail) + 1
-                            else:
-                                dyn_max_iterations = max_iterations
+            # adaptive iteration count, recomputed once per batch (the loop
+            # condition is only tested per batch anyway, so the serial driver's
+            # per-hypothesis update never had an effect other than through its
+            # final value)
+            if any_candidate:
+                eps = best_num_inliers / num_points
+                if eps > 0.0:
+                    eps_k = eps ** sample_size
+                    if eps_k >= 1.0:
+                        dyn_max_iterations = 0
+                    elif eps_k > 0.0:
+                        log_success_fail = math.log(1.0 - eps_k)
+                        if log_success_fail < 0.0:
+                            dyn_max_iterations = int(log_fail / log_success_fail) + 1
                         else:
                             dyn_max_iterations = max_iterations
+                    else:
+                        dyn_max_iterations = max_iterations
 
         # final refinement of the overall best model
         if lo_iterations > 0 and best_num_inliers > sample_size:
