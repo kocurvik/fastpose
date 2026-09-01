@@ -34,6 +34,19 @@ Use `fastpose-warmup --problem fundamental` / `essential` / `absolute` /
 `absolute-focal` / `varying-focal` / `shared-focal` / `monodepth` to warm up
 only one backend (`monodepth` covers all four monodepth variants). Note that the warmup may take several minutes.
 
+### Where the compiled kernels go
+
+The cache lands in `__pycache__` directories next to the installed package and
+is **large** — a full warmup writes hundreds of MB of `.nbc`/`.nbi` files. Set
+`NUMBA_CACHE_DIR` to put it somewhere you can manage or clear instead. If the
+install directory is not writable (system installs, containers), numba falls
+back to a user-wide cache directory on its own.
+
+Entries are keyed on the host CPU, the numba version and each source file's
+timestamp and size, so an upgrade recompiles rather than reusing stale code —
+but `pip` does not remove the superseded files, and they accumulate until the
+directory is deleted by hand.
+
 ### Multiprocessing
 
 **Warm the cache before you fork.** Numba's on-disk kernel cache is not safe
