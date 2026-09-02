@@ -16,6 +16,8 @@ from a branch → `website` / root).
 | `src/bench.json` | The benchmark results the page plots. |
 | `src/build.py` | `src/page.html` + `src/bench.json` → `index.html`. |
 | `src/make_data.py` | fastposebench CSVs → `src/bench.json`. |
+| `src/make_card.py` | `src/bench.json` → `og.png`, the 1200×630 social card. |
+| `og.png` | Social preview image, referenced by the Open Graph tags. Generated. |
 | `.nojekyll` | Serve the files as they are, without Jekyll. |
 
 ## Rebuilding
@@ -33,7 +35,14 @@ python src/make_data.py --csv_dir /path/to/fastposebench/csv_results
 python src/build.py
 ```
 
-`make_data.py` needs `pandas`; `build.py` needs only the standard library. Commit
+After changing the headline or the palette, re-render the social card too:
+
+```
+python src/make_card.py
+```
+
+`make_data.py` needs `pandas`, `make_card.py` needs `matplotlib` and `pillow`;
+`build.py` needs only the standard library. Commit
 the regenerated `index.html` along with whatever changed under `src/` — Pages
 serves the built file, not the template.
 

@@ -14,9 +14,14 @@ import re
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+SITE = 'https://kocurvik.github.io/fastpose/'
+
 DESC = ('fastpose reaches PoseLib accuracy in a fraction of the runtime: a numba-compiled '
         'LO-RANSAC engine for robust relative pose, benchmarked on ETH3D, ScanNet++ and '
         'PhotoTourism.')
+
+ALT = ('Accuracy against runtime on ScanNet++: fastpose on one core, four cores and a GPU '
+       'all reach the accuracy of PoseLib far to the left of it on a log time axis.')
 
 FAVICON = ('data:image/svg+xml,'
            '%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E'
@@ -29,10 +34,22 @@ HEAD = u"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <meta name="description" content="{desc}">
+<link rel="canonical" href="{site}">
 <meta property="og:type" content="website">
+<meta property="og:site_name" content="fastpose">
+<meta property="og:url" content="{site}">
 <meta property="og:title" content="{title}">
 <meta property="og:description" content="{desc}">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="{site}og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="{alt}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{title}">
+<meta name="twitter:description" content="{desc}">
+<meta name="twitter:image" content="{site}og.png">
+<meta name="twitter:image:alt" content="{alt}">
 <link rel="icon" href="{favicon}">
 {links}
 <style>
@@ -62,8 +79,8 @@ def build():
     for link in links:
         body = body.replace(link, '', 1)
 
-    head = HEAD.format(title=title, desc=DESC, favicon=FAVICON,
-                       links=''.join(links).rstrip())
+    head = HEAD.format(title=title, desc=DESC, favicon=FAVICON, site=SITE,
+                       alt=ALT, links=''.join(links).rstrip())
     out = head + body.lstrip() + u'\n</body>\n</html>\n'
 
     path = os.path.join(ROOT, 'index.html')
