@@ -1,0 +1,1183 @@
+<title>fastpose Benchmark</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&display=swap">
+
+<style>
+:root{
+  color-scheme: dark;
+  --page:        #0b0e13;
+  --surface:     #141920;
+  --surface-2:   #1c222b;
+  --surface-3:   #10151b;
+  --ink:         #eef2f7;
+  --ink-2:       #aeb7c4;
+  --muted:       #7d8794;
+  --grid:        #222932;
+  --axis:        #38414d;
+  --rule:        rgba(238,242,247,0.09);
+  --s1:          #3987e5;
+  --s2:          #d95926;
+  --s3:          #199e70;
+  --base:        #6d747f;
+  --base-soft:   rgba(109,116,127,0.26);
+  --accent-soft: rgba(57,135,229,0.11);
+  --good:        #34b364;
+  --shadow:      0 1px 2px rgba(0,0,0,.45), 0 14px 34px -22px rgba(0,0,0,.9);
+
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body:    "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --mono:    "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--page);
+  color:var(--ink);
+  font-family:var(--body);
+  font-size:16px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px;margin:0 auto;padding:0 clamp(16px,3.4vw,28px)}
+
+/* ---------- hero ---------- */
+.hero{padding:clamp(38px,7vw,64px) 0 40px}
+.eyebrow{
+  font-family:var(--display);font-weight:600;font-size:11.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 20px;
+  display:flex;flex-wrap:wrap;gap:0 9px;align-items:baseline;
+}
+.eyebrow a{color:var(--s1);text-decoration:none;border-bottom:1px solid rgba(57,135,229,.4)}
+.eyebrow a:hover{border-bottom-color:var(--s1)}
+.eyebrow-sep{color:var(--axis)}
+h1{
+  font-family:var(--display);font-weight:700;font-size:clamp(34px,5.4vw,58px);
+  line-height:1.05;letter-spacing:-.022em;margin:0;text-wrap:balance;
+}
+h1 .lift{color:var(--s1)}
+.deck{
+  font-size:clamp(16px,1.5vw,19px);line-height:1.55;color:var(--ink-2);margin:22px 0 0;
+}
+.hero-grid{
+  display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);
+  gap:clamp(24px,3.4vw,44px);align-items:end;margin-top:clamp(28px,4vw,40px);
+}
+@media (max-width:900px){.hero-grid{grid-template-columns:1fr;gap:28px;align-items:stretch}}
+
+.thesis{
+  background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+  padding:18px 18px 12px;box-shadow:var(--shadow);
+}
+.thesis-cap{
+  font-family:var(--display);font-size:11.5px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 2px;
+}
+.thesis-sub{font-size:13px;color:var(--ink-2);margin:0 0 10px}
+.thesis-foot{
+  font-size:12.5px;color:var(--muted);margin:8px 0 0;padding-top:8px;
+  border-top:1px solid var(--rule);text-wrap:pretty;
+}
+.hero-side{display:flex;flex-direction:column;gap:14px;justify-content:flex-end}
+
+/* ---------- filters ---------- */
+.panel{background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+  box-shadow:var(--shadow);overflow:hidden}
+.panel-controls{
+  display:flex;flex-wrap:wrap;gap:12px 26px;align-items:center;
+  padding:14px clamp(14px,2vw,20px);background:var(--surface-3);
+  border-bottom:1px solid var(--rule);
+}
+.panel-scope{
+  font-size:12.5px;color:var(--muted);margin:0 0 0 auto;
+}
+.panel .card{border:0;border-radius:0;box-shadow:none}
+.panel .card + .card{margin-top:0;border-top:1px solid var(--rule)}
+.fgroup{display:flex;align-items:center;gap:9px;min-width:0}
+.flabel{
+  font-family:var(--display);font-size:10.5px;font-weight:600;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted);
+}
+.seg{display:flex;background:var(--page);border-radius:3px;padding:2px;gap:2px}
+.seg button{
+  font-family:var(--body);font-size:13.5px;font-weight:600;color:var(--ink-2);
+  background:none;border:0;border-radius:2px;padding:5px 11px;cursor:pointer;
+  line-height:1.2;white-space:nowrap;
+}
+.seg button:hover{color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.10)}
+select{
+  font-family:var(--body);font-size:13.5px;font-weight:600;color:var(--ink);
+  background:var(--page);border:1px solid transparent;border-radius:3px;
+  padding:6px 9px;cursor:pointer;max-width:100%;
+}
+:focus-visible{outline:2px solid var(--s1);outline-offset:2px}
+
+/* ---------- KPI ---------- */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:1px;
+  background:var(--rule);border:1px solid var(--rule);border-radius:4px;overflow:hidden;margin:0}
+.kpis-inset{background:var(--rule);margin-top:14px}
+.kpis-inset .kpi{background:var(--surface-3);padding:14px 15px 13px}
+.kpis-inset .kpi-v{font-size:clamp(22px,2.5vw,28px)}
+.kpi{background:var(--surface);padding:16px 16px 15px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.kpi-l{font-family:var(--display);font-size:10.5px;font-weight:600;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted)}
+.kpi-v{font-family:var(--display);font-weight:700;font-size:clamp(27px,3.2vw,36px);
+  line-height:1;letter-spacing:-.02em;color:var(--ink)}
+.kpi-n{font-size:12.5px;color:var(--ink-2);line-height:1.4;text-wrap:pretty}
+.kpi-l{display:flex;align-items:center}
+.kpis-stack{grid-template-columns:minmax(0,1fr)}
+.kpis-stack .kpi{flex-direction:row;align-items:baseline;justify-content:space-between;
+  gap:16px;padding:13px 16px}
+.kpis-stack .kpi-txt{display:flex;flex-direction:column;gap:3px;min-width:0}
+.kpis-stack .kpi-v{font-size:clamp(19px,2.3vw,25px);white-space:nowrap;flex:none}
+.kpis-stack .kpi-n{font-size:12px}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none;margin-right:6px;vertical-align:baseline}
+
+/* ---------- sections ---------- */
+section{padding:clamp(40px,6vw,58px) 0 0}
+.sec-head{margin-bottom:22px}
+h2{font-family:var(--display);font-weight:700;font-size:clamp(21px,2.6vw,26px);
+  letter-spacing:-.014em;margin:0;text-wrap:balance}
+.sec-head p{font-size:15px;color:var(--ink-2);margin:9px 0 0;text-wrap:pretty}
+
+.install{display:flex;flex-direction:column;gap:1px;background:var(--rule);
+  border:1px solid var(--rule);border-radius:4px;overflow:hidden}
+.install-cmd{background:var(--surface);padding:20px 22px;display:flex;align-items:center;gap:11px;
+  font-family:var(--mono);font-size:clamp(15px,1.7vw,19px);min-width:0}
+.install-cmd .prompt{color:var(--s3);flex:none}
+.install-cmd .cmd{color:var(--ink);font-weight:500;overflow-x:auto;white-space:nowrap}
+.install .code{background:var(--surface-3);margin:0;padding:20px 22px;overflow-x:auto;
+  font-family:var(--mono);font-size:12.5px;line-height:1.65;color:var(--ink-2)}
+.install .code .c{color:var(--muted)}
+.install .code .k{color:var(--s1)}
+.install .code .s{color:var(--s3)}
+.install .code .n{color:var(--s2)}
+.install-note{background:var(--surface);margin:0;padding:16px 22px 18px;font-size:13.5px;
+  color:var(--ink-2);line-height:1.55}
+.install-note code{font-size:.9em}
+.card{background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+  box-shadow:var(--shadow);padding:clamp(14px,2vw,20px) clamp(14px,2vw,20px) 14px;min-width:0}
+.card + .card{margin-top:14px}
+.card-head{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:4px}
+.card-t{font-family:var(--display);font-size:14px;font-weight:600;letter-spacing:.01em;margin:0}
+.card-s{font-size:12.5px;color:var(--muted);margin:0}
+.chart{width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.chart svg{display:block}
+
+/* legend */
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin:2px 0 12px}
+.lg{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--ink-2)}
+.lg .key{width:16px;height:2px;border-radius:1px;flex:none}
+.lg .key.sq{width:10px;height:10px;border-radius:2px}
+
+/* table view */
+.tbtn{
+  font-family:var(--display);font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);background:none;border:1px solid var(--rule);border-radius:3px;
+  padding:4px 9px;cursor:pointer;
+}
+.tbtn:hover{color:var(--ink);border-color:var(--axis)}
+.tbl{margin-top:12px;overflow-x:auto;border-top:1px solid var(--rule);padding-top:10px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:5px 12px 5px 0;text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+thead th{font-family:var(--display);font-size:10.5px;font-weight:600;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--rule);padding-bottom:6px}
+tbody td{font-variant-numeric:tabular-nums;font-family:var(--mono);font-size:12.5px;color:var(--ink-2)}
+tbody td:first-child{font-family:var(--body);font-size:13px;color:var(--ink)}
+tbody tr:not(:last-child) td{border-bottom:1px solid var(--rule)}
+
+/* prose */
+.prose p{font-size:15.5px;color:var(--ink-2);margin:0 0 14px}
+.prose strong{color:var(--ink);font-weight:600}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1px;
+  background:var(--rule);border:1px solid var(--rule);border-radius:4px;overflow:hidden;margin-top:8px}
+.note{background:var(--surface);padding:16px 18px}
+.note h3{font-family:var(--display);font-size:12px;font-weight:600;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 7px}
+.note p{font-size:14px;color:var(--ink-2);margin:0;line-height:1.55}
+.note a{color:var(--s1);text-decoration:none;border-bottom:1px solid rgba(57,135,229,.35)}
+.note a:hover{border-bottom-color:var(--s1)}
+code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);padding:1px 5px;border-radius:3px;color:var(--ink)}
+.flag{border-left:3px solid var(--s2);padding-left:14px}
+
+.reflist{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));
+  gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:4px;overflow:hidden}
+.refgroup{background:var(--surface);padding:18px 20px 20px;min-width:0}
+.refgroup h3{font-family:var(--display);font-size:11px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 10px}
+.refgroup ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+.refgroup li{font-size:13.5px;line-height:1.5;color:var(--ink-2);text-wrap:pretty}
+.refgroup li strong{color:var(--ink);font-weight:600}
+.refgroup a{color:var(--s1);text-decoration:none;border-bottom:1px solid rgba(57,135,229,.35)}
+.refgroup a:hover{border-bottom-color:var(--s1)}
+footer{padding:40px 0 60px;margin-top:48px;border-top:1px solid var(--rule);
+  font-size:13.5px;color:var(--muted);line-height:1.7}
+footer a{color:var(--ink-2);text-decoration:none;border-bottom:1px solid var(--rule)}
+footer a:hover{color:var(--ink)}
+footer a{color:var(--ink-2)}
+
+/* tooltip */
+#tip{
+  position:fixed;z-index:80;pointer-events:none;opacity:0;transition:opacity .09s;
+  background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+  box-shadow:var(--shadow);padding:9px 11px;font-size:12.5px;min-width:150px;
+}
+#tip .tt{font-family:var(--display);font-size:12px;font-weight:600;color:var(--ink);margin-bottom:5px}
+#tip .tr{display:flex;align-items:center;gap:8px;line-height:1.5}
+#tip .tk{width:12px;height:2px;border-radius:1px;flex:none}
+#tip .tn{color:var(--muted);flex:1;white-space:nowrap}
+#tip .tv{font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">
+    <a href="https://github.com/kocurvik/fastpose">github.com/kocurvik/fastpose</a>
+    <span class="eyebrow-sep">&middot;</span> Benchmark
+    <span class="eyebrow-sep">&middot;</span> ETH3D
+    <span class="eyebrow-sep">&middot;</span> ScanNet++
+    <span class="eyebrow-sep">&middot;</span> PhotoTourism
+  </p>
+  <h1>PoseLib accuracy, <span class="lift">a fraction of the runtime</span>.</h1>
+  <p class="deck">
+    fastpose is a numba-compiled LO-RANSAC engine for robust relative pose. Against
+    PoseLib&rsquo;s C++ implementation on the same correspondences, budget and error thresholds,
+    it lands the same poses &mdash; a median difference of a few hundredths of an mAA point &mdash;
+    and gets there two to ten times sooner on one CPU core, or one to two orders of magnitude
+    sooner on a GPU.
+  </p>
+
+  <div class="hero-grid">
+    <div class="thesis">
+      <p class="thesis-cap">The frontier, in one panel</p>
+      <p class="thesis-sub">ScanNet++ &middot; calibrated RePoseD 3&#8209;point &middot; RoMa v2 4096</p>
+      <div class="chart" id="hero-chart"></div>
+      <div class="legend" id="hero-legend" style="margin:8px 0 0"></div>
+      <p class="thesis-foot">
+        PoseLib needs <strong>1101&nbsp;ms</strong> and 5000 iterations to reach 89.01&nbsp;mAA.
+        fastpose passes it on the GPU in <strong>12.7&nbsp;ms</strong> &mdash; and beats it on a single
+        core in 84&nbsp;ms.
+      </p>
+    </div>
+    <div class="hero-side">
+      <div class="kpis kpis-stack" id="kpis"></div>
+    </div>
+  </div>
+</header>
+
+</div>
+
+<div class="wrap">
+
+<section id="install">
+  <div class="sec-head">
+    <h2>Install it</h2>
+    <p>
+      Two dependencies, <code>numpy</code> and <code>numba</code>. Every <code>estimate_*</code>
+      function takes <code>device='cuda'</code> to run the same estimate batched on the GPU.
+    </p>
+  </div>
+  <div class="install">
+    <div class="install-cmd">
+      <span class="prompt">$</span><span class="cmd">pip install fastpose</span>
+    </div>
+    <pre class="code"><span class="c"># warm the numba kernels once, before you fork workers</span>
+<span class="k">from</span> fastpose.estimators.warmup <span class="k">import</span> warmup
+warmup()
+
+<span class="c"># calibrated relative pose, 5-point, on the CPU</span>
+<span class="k">from</span> fastpose.estimators <span class="k">import</span> estimate_relative_pose
+model, info = estimate_relative_pose(x1, x2, camera1=K1, camera2=K2,
+                                     iterations=<span class="n">5000</span>, max_error=<span class="n">2.0</span>)
+
+<span class="c"># the pose comes out of the model dict</span>
+R = model[<span class="s">'R'</span>]                 <span class="c"># 3x3 rotation</span>
+t = model[<span class="s">'t'</span>]                 <span class="c"># 3-vector translation, up to scale</span>
+inliers = info[<span class="s">'inliers'</span>]      <span class="c"># boolean mask over the correspondences</span>
+
+<span class="c"># the same call, batched on the GPU</span>
+model, info = estimate_relative_pose(x1, x2, camera1=K1, camera2=K2,
+                                     iterations=<span class="n">5000</span>, max_error=<span class="n">2.0</span>,
+                                     device=<span class="s">'cuda'</span>)
+R, t = model[<span class="s">'R'</span>], model[<span class="s">'t'</span>]</pre>
+    <p class="install-note">
+      Numba compiles lazily, so the first call to each estimator is slow. Run
+      <code>fastpose-warmup</code> (or <code>--device cuda</code>) up front, and always warm the
+      cache before forking worker processes.
+    </p>
+  </div>
+</section>
+
+</div>
+
+<div class="wrap">
+
+<section id="frontier">
+  <div class="sec-head">
+    <h2>The accuracy&ndash;time frontier</h2>
+    <p>
+      Each point is one RANSAC budget, 100 to 5000 iterations, and 20&nbsp;000 on the GPU.
+      Accuracy saturates early, so the curves separate along the horizontal rather than the
+      vertical. <strong>Note the compressed accuracy axis:</strong> a panel usually spans about
+      one mAA point, so a curve further left is faster at equal accuracy, not a trade against it.
+    </p>
+  </div>
+  <div class="panel">
+    <div class="panel-controls">
+
+    <div class="fgroup">
+      <span class="flabel">Matcher</span>
+      <div class="seg" id="f-matcher" role="group" aria-label="Matcher">
+        <button type="button" data-v="RoMa">RoMa v2</button>
+        <button type="button" data-v="LoMa">LoMa</button>
+      </div>
+    </div>
+    <div class="fgroup">
+      <span class="flabel" id="lab-n">Correspondences</span>
+      <div class="seg" id="f-n" role="group" aria-label="Correspondence budget">
+        <button type="button" data-v="2048">2048</button>
+        <button type="button" data-v="4096">4096</button>
+        <button type="button" data-v="16384">16384</button>
+      </div>
+    </div>
+    <div class="fgroup">
+      <span class="flabel"><label for="f-problem">Solver</label></span>
+      <select id="f-problem"></select>
+    </div>
+      <p class="panel-scope">Applies to every chart on this page.</p>
+    </div>
+    <div id="frontier-cards"></div>
+  </div>
+</section>
+
+<section id="budget">
+  <div class="sec-head">
+    <h2>On the GPU, the budget stops being a trade-off</h2>
+    <p>
+      On a CPU every iteration is paid for in full, so the budget trades against latency.
+      The CUDA backend runs the batch on the device, where <strong>5000 iterations</strong>
+      &mdash; past the flattening of the curves above &mdash; costs roughly what a single core
+      needs for its cheapest 100-iteration run. Going on to 20&nbsp;000 costs about 60% more,
+      and moves accuracy by under a point either way.
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <p class="card-t">Runtime as the budget grows</p>
+        <p class="card-s" id="bud-sub"></p>
+      </div>
+      <button class="tbtn" type="button" data-table="bud-table">Table view</button>
+    </div>
+    <div class="kpis kpis-inset" id="bud-claims"></div>
+    <div class="legend" id="bud-legend" style="margin-top:18px"></div>
+    <div class="chart" id="bud-chart"></div>
+    <div class="tbl" id="bud-table" hidden></div>
+  </div>
+</section>
+
+<section id="speedup">
+  <div class="sec-head">
+    <h2>Speed-up by solver</h2>
+    <p>
+      Wall-clock time per pair at a matched 5000 iterations, divided by PoseLib&rsquo;s time on
+      the same pairs; <strong>1&times; is parity</strong>. The scale is logarithmic because the
+      GPU sits two orders of magnitude from the CPU. Median over the datasets each solver runs on.
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-head">
+      <div>
+        <p class="card-t" id="sp-title">Speed-up over PoseLib &mdash; matched at 5000 iterations</p>
+        <p class="card-s" id="sp-sub"></p>
+      </div>
+      <button class="tbtn" type="button" data-table="sp-table">Table view</button>
+    </div>
+    <div class="legend" id="sp-legend"></div>
+    <div class="chart" id="sp-chart"></div>
+    <div class="tbl" id="sp-table" hidden></div>
+  </div>
+</section>
+
+<section id="method" class="prose">
+  <div class="sec-head">
+    <h2>How this was measured</h2>
+  </div>
+  <div class="notes">
+    <div class="note">
+      <h3>Data</h3>
+      <p style="margin-bottom:8px">Produced by
+      <a href="https://github.com/kocurvik/fastposebench">fastposebench</a>.</p>
+      <p>Every 5th pair of the standard benchmark: ETH3D and ScanNet++ (shared intrinsics)
+      and PhotoTourism (varying intrinsics). Correspondences from RoMa v2 base and from LoMa;
+      the budget selector is total sampled matches for RoMa v2 and maximum keypoints for LoMa.</p>
+    </div>
+    <div class="note">
+      <h3>Matched conditions</h3>
+      <p>Both backends see the identical correspondences, the same Sampson threshold
+      (2.0&nbsp;px), the same truncated reprojection threshold (16.0&nbsp;px) and the same
+      iteration count. Timings are mean wall-clock per pair and exclude the depth network,
+      which costs about 88&nbsp;ms per pair on its own.</p>
+    </div>
+    <div class="note">
+      <h3>Hardware</h3>
+      <p>CPU runs are one process pinned to 1 or 4 cores. The GPU column is the CUDA backend
+      running the whole estimate batched on one device, at 5000&ndash;20&nbsp;000 iterations;
+      lower budgets do not fill the device and are not reported.</p>
+    </div>
+    <div class="note">
+      <h3>Accuracy</h3>
+      <p>Pose mAA@10&deg; is the mean average accuracy of the max of rotation and translation
+      error, integrated to a 10&deg; threshold, in percent. Higher is better. mAA@5&deg; and the
+      median pose error are in the table views.</p>
+    </div>
+  </div>
+</section>
+
+<section id="refs">
+  <div class="sec-head">
+    <h2>References</h2>
+    <p>
+      fastpose is a numba port of algorithms implemented in PoseLib. If you use it, please cite
+      PoseLib and the papers behind the solvers you actually run.
+    </p>
+  </div>
+
+  <div class="reflist">
+    <div class="refgroup">
+      <h3>Code &amp; data</h3>
+      <ul>
+        <li><a href="https://github.com/kocurvik/fastpose">fastpose</a> &mdash; the library benchmarked here.</li>
+        <li><a href="https://github.com/kocurvik/fastposebench">fastposebench</a> &mdash; the harness that produced every number on this page.</li>
+        <li><a href="https://github.com/PoseLib/PoseLib">PoseLib</a> &mdash; Larsson and contributors, the C++ baseline and the source of the ported solvers.</li>
+      </ul>
+    </div>
+
+    <div class="refgroup">
+      <h3>Datasets</h3>
+      <ul>
+        <li><a href="https://www.eth3d.net/">ETH3D</a> &mdash; Sch&ouml;ps, Sch&ouml;nberger, Galliani, Sattler, Schindler, Pollefeys and Geiger, <em>A Multi-View Stereo Benchmark with High-Resolution Images and Multi-Camera Videos</em>, CVPR 2017.</li>
+        <li><a href="https://scannetpp.mlsg.cit.tum.de/">ScanNet++</a> &mdash; Yeshwanth, Liu, Nie&szlig;ner and Dai, <em>ScanNet++: A High-Fidelity Dataset of 3D Indoor Scenes</em>, ICCV 2023.</li>
+        <li><a href="https://www.cs.ubc.ca/research/image-matching-challenge/2021/">PhotoTourism</a> &mdash; the <a href="https://arxiv.org/abs/2003.01587">IMC 2021</a> release; Jin, Mishkin, Mishchuk, Matas, Fua, Yi and Trulls, <em>Image Matching across Wide Baselines: From Paper to Practice</em>, IJCV 2021.</li>
+      </ul>
+    </div>
+
+    <div class="refgroup">
+      <h3>Correspondences &amp; depth</h3>
+      <ul>
+        <li><a href="https://github.com/Parskatt/RoMa">RoMa v2</a> &mdash; Edstedt, <em>Harder Better Faster Denser Feature Matching</em>; dense matcher, base model.</li>
+        <li><a href="https://github.com/davnords/LoMa">LoMa</a> &mdash; sparse keypoint matcher, <code>LoMaB</code> configuration.</li>
+        <li><a href="https://github.com/microsoft/MoGe">MoGe</a> &mdash; monocular geometry; the RePoseD solvers are fed MoGe&#8209;v1 ViT&#8209;L depth.</li>
+      </ul>
+    </div>
+
+    <div class="refgroup">
+      <h3>Solvers on this page</h3>
+      <ul>
+        <li><strong>Calibrated 5-point</strong> &mdash; Nist&eacute;r, <em>An efficient solution to the five-point relative pose problem</em>, TPAMI 2004; nullspace and action-matrix formulation from Stew&eacute;nius, Engels and Nist&eacute;r, ISPRS 2006.</li>
+        <li><strong>Shared-focal 6-point</strong> &mdash; Stew&eacute;nius, Nist&eacute;r, Kahl and Schaffalitzky, <em>A minimal solution for relative pose with unknown focal length</em>, IVC 2008; PoseLib&rsquo;s solver generated with Larsson, &Aring;str&ouml;m and Oskarsson, CVPR 2017.</li>
+        <li><strong>Varying-focal 7-point</strong> &mdash; Hartley-style isotropic normalization, <em>In defense of the eight-point algorithm</em>, TPAMI 1997; focal lengths recovered with Rybkin&rsquo;s closed form (2017), an SVD-free equivalent of Bougnoux, ICCV 1998. The pipeline appears as a baseline in Kocur et al., <em>Are Minimal Radial Distortion Solvers Really Necessary for Relative Pose Estimation?</em>, IJCV 2026.</li>
+        <li><strong>RePoseD 3-point</strong> &mdash; Ding, Kocur, V&aacute;vra, Berger Haladov&aacute;, Yang, Sattler and Kukelova, <em>RePoseD: Efficient Relative Pose Estimation With Known Depth Information</em>, ICCV 2025.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<footer class="wrap" style="padding-left:0;padding-right:0">
+  <a href="https://github.com/kocurvik/fastpose">github.com/kocurvik/fastpose</a> &mdash; a fast
+  Python backend for robust camera pose estimation, built on numba and benchmarked against
+  <a href="https://github.com/PoseLib/PoseLib">PoseLib</a>. Every figure here is read from the
+  CSVs produced by <a href="https://github.com/kocurvik/fastposebench">fastposebench</a>; the
+  table view under each chart carries the underlying numbers.
+</footer>
+
+</div>
+
+<div id="tip" role="status" aria-live="polite"></div>
+
+<script id="bench" type="application/json">__DATA__</script>
+<script>
+(function(){
+"use strict";
+
+var ROWS = JSON.parse(document.getElementById('bench').textContent).rows;
+
+var DEV = [
+  {id:'poselib_1c',  label:'PoseLib · 1 core',  short:'PoseLib', color:'var(--base)'},
+  {id:'fastpose_1c', label:'fastpose · 1 core', short:'1 core',  color:'var(--s1)'},
+  {id:'fastpose_4c', label:'fastpose · 4 cores',short:'4 cores', color:'var(--s2)'},
+  {id:'fastpose_gpu',label:'fastpose · GPU',    short:'GPU',     color:'var(--s3)'}
+];
+var DEVBY = {}; DEV.forEach(function(d){DEVBY[d.id]=d;});
+
+var PROB = [
+  {id:'kf_5p',            name:'Calibrated · 5-point',            fam:'kf', kind:'points'},
+  {id:'kf_reposed',       name:'Calibrated · RePoseD 3-point',      fam:'kf', kind:'depth'},
+  {id:'kf_reposed_shift', name:'Calibrated · RePoseD 3-point + shift', fam:'kf', kind:'depth'},
+  {id:'sf_6p',            name:'Shared focal · 6-point',          fam:'sf', kind:'points'},
+  {id:'sf_reposed',       name:'Shared focal · RePoseD 3-point',    fam:'sf', kind:'depth'},
+  {id:'vf_7p',            name:'Varying focal · 7-point',         fam:'vf', kind:'points'},
+  {id:'vf_reposed',       name:'Varying focal · RePoseD 3-point',   fam:'vf', kind:'depth'}
+];
+var PROBBY = {}; PROB.forEach(function(p){PROBBY[p.id]=p;});
+var FAMNAME = {kf:'Calibrated', sf:'Shared focal', vf:'Varying focal'};
+
+var DS = [
+  {id:'eth3d',     name:'ETH3D'},
+  {id:'scannetpp', name:'ScanNet++'},
+  {id:'pt',        name:'PhotoTourism'}
+];
+var DSBY = {}; DS.forEach(function(d){DSBY[d.id]=d;});
+
+var S = {matcher:'RoMa', n:4096, problem:'kf_reposed'};
+function matcherLabel(){ return S.matcher==='RoMa' ? 'RoMa v2' : S.matcher; }
+
+/* ---------- small helpers ---------- */
+function sel(f){
+  return ROWS.filter(function(r){
+    for(var k in f){ if(r[k]!==f[k]) return false; }
+    return true;
+  });
+}
+function median(a){
+  if(!a.length) return NaN;
+  var b=a.slice().sort(function(x,y){return x-y;}), m=b.length>>1;
+  return b.length%2 ? b[m] : (b[m-1]+b[m])/2;
+}
+function fmtMs(v){ return v>=100 ? Math.round(v).toLocaleString() : v.toFixed(1); }
+function fmtX(v){ return (v>=10?v.toFixed(0):v.toFixed(1))+'×'; }
+function fmtA(v){ return v.toFixed(2); }
+function el(tag,attrs,txt){
+  var e=document.createElementNS('http://www.w3.org/2000/svg',tag);
+  for(var k in attrs){ if(attrs[k]!==null&&attrs[k]!==undefined) e.setAttribute(k,attrs[k]); }
+  if(txt!==undefined&&txt!==null) e.textContent=txt;
+  return e;
+}
+function mk(tag,cls,txt){
+  var e=document.createElement(tag);
+  if(cls) e.className=cls;
+  if(txt!==undefined&&txt!==null) e.textContent=txt;
+  return e;
+}
+function niceTicks(lo,hi,n){
+  var span=hi-lo; if(!(span>0)) return [lo];
+  var step=Math.pow(10,Math.floor(Math.log10(span/n)));
+  var err=span/n/step;
+  if(err>=5) step*=5; else if(err>=2) step*=2;
+  var out=[],v=Math.ceil(lo/step)*step;
+  for(;v<=hi+step*1e-6;v+=step) out.push(Math.round(v/step)*step);
+  return out;
+}
+function logTicks(lo,hi){
+  var out=[];
+  for(var e=Math.floor(Math.log10(lo)); e<=Math.ceil(Math.log10(hi)); e++){
+    [1,2,5].forEach(function(m){
+      var v=m*Math.pow(10,e);
+      if(v>=lo*0.999&&v<=hi*1.001) out.push(v);
+    });
+  }
+  return out;
+}
+
+/* ---------- tooltip ---------- */
+var TIP=document.getElementById('tip');
+function showTip(evt,title,rows){
+  TIP.textContent='';
+  var h=mk('div','tt',title); TIP.appendChild(h);
+  rows.forEach(function(r){
+    var line=mk('div','tr');
+    var k=mk('span','tk'); k.style.background=r.color||'var(--muted)';
+    if(r.color===null) k.style.background='transparent';
+    line.appendChild(k);
+    line.appendChild(mk('span','tn',r.name));
+    line.appendChild(mk('span','tv',r.value));
+    TIP.appendChild(line);
+  });
+  TIP.style.opacity='1';
+  moveTip(evt);
+}
+function moveTip(evt){
+  var r=TIP.getBoundingClientRect();
+  var x=evt.clientX+14, y=evt.clientY+14;
+  if(x+r.width>window.innerWidth-8) x=evt.clientX-r.width-14;
+  if(y+r.height>window.innerHeight-8) y=evt.clientY-r.height-14;
+  TIP.style.left=Math.max(8,x)+'px';
+  TIP.style.top=Math.max(8,y)+'px';
+}
+function hideTip(){ TIP.style.opacity='0'; }
+document.addEventListener('scroll',hideTip,true);
+
+/* ---------- legend ---------- */
+function legend(host,items,square){
+  host.textContent='';
+  items.forEach(function(it){
+    var s=mk('span','lg');
+    var k=mk('span','key'+(square?' sq':''));
+    k.style.background=it.color;
+    s.appendChild(k);
+    s.appendChild(document.createTextNode(it.label));
+    host.appendChild(s);
+  });
+}
+
+/* ---------- table view ---------- */
+function table(host,cols,rows){
+  host.textContent='';
+  var t=mk('table'), th=mk('thead'), tr=mk('tr');
+  cols.forEach(function(c){ tr.appendChild(mk('th',null,c)); });
+  th.appendChild(tr); t.appendChild(th);
+  var tb=mk('tbody');
+  rows.forEach(function(r){
+    var x=mk('tr');
+    r.forEach(function(c){ x.appendChild(mk('td',null,c)); });
+    tb.appendChild(x);
+  });
+  t.appendChild(tb); host.appendChild(t);
+}
+document.querySelectorAll('[data-table]').forEach(function(b){
+  b.addEventListener('click',function(){
+    var t=document.getElementById(b.getAttribute('data-table'));
+    t.hidden=!t.hidden;
+    b.textContent=t.hidden?'Table view':'Hide table';
+  });
+});
+
+/* =======================================================================
+   Frontier: accuracy vs runtime, log x, one panel per dataset
+   ======================================================================= */
+function frontierSeries(matcher,n,dataset,problem){
+  return DEV.map(function(d){
+    var pts=sel({matcher:matcher,n:n,dataset:dataset,problem:problem,device:d.id})
+      .sort(function(a,b){return a.iters-b.iters;})
+      .map(function(r){return {x:r.mean_runtime,y:r.pose_mAA_10,it:r.iters,r:r};});
+    return {dev:d,pts:pts};
+  }).filter(function(s){return s.pts.length;});
+}
+
+function drawFrontier(host,series,width,height,opts){
+  opts=opts||{};
+  var padL=opts.padL||46, padR=opts.padR||18,
+      padT=opts.padT||14, padB=opts.padB||34;
+  var iw=Math.max(60,width-padL-padR), ih=Math.max(50,height-padT-padB);
+
+  var xs=[],ys=[];
+  series.forEach(function(s){s.pts.forEach(function(p){xs.push(p.x);ys.push(p.y);});});
+  if(!xs.length){ host.textContent=''; return; }
+  var x0=Math.min.apply(null,xs), x1=Math.max.apply(null,xs);
+  x0=Math.pow(10,Math.floor(Math.log10(x0)*3)/3);
+  x1=Math.pow(10,Math.ceil(Math.log10(x1)*3)/3);
+  var l0=Math.log10(x0), l1=Math.log10(x1);
+  var y0=Math.min.apply(null,ys), y1=Math.max.apply(null,ys);
+  var ypad=Math.max((y1-y0)*0.30,0.18);
+  y0-=ypad; y1+=ypad;
+
+  var X=function(v){return padL+(Math.log10(v)-l0)/(l1-l0)*iw;};
+  var Y=function(v){return padT+ih-(v-y0)/(y1-y0)*ih;};
+
+  var svg=el('svg',{width:width,height:height,viewBox:'0 0 '+width+' '+height,
+    role:'img','aria-label':opts.aria||'accuracy versus runtime'});
+
+  // grid + y axis
+  var yt=niceTicks(y0,y1,opts.compact?3:4);
+  yt.forEach(function(v){
+    svg.appendChild(el('line',{x1:padL,x2:padL+iw,y1:Y(v),y2:Y(v),stroke:'var(--grid)','stroke-width':1}));
+    svg.appendChild(el('text',{x:padL-8,y:Y(v)+3.5,'text-anchor':'end',fill:'var(--muted)',
+      'font-size':opts.compact?9.5:10.5,'font-family':'var(--mono)'},v.toFixed(1)));
+  });
+  // x axis
+  var xt=logTicks(x0,x1);
+  xt.forEach(function(v){
+    svg.appendChild(el('line',{x1:X(v),x2:X(v),y1:padT,y2:padT+ih,stroke:'var(--grid)','stroke-width':1}));
+    svg.appendChild(el('text',{x:X(v),y:padT+ih+15,'text-anchor':'middle',fill:'var(--muted)',
+      'font-size':opts.compact?9.5:10.5,'font-family':'var(--mono)'},
+      v>=1000?(v/1000)+'k':String(v)));
+  });
+  svg.appendChild(el('line',{x1:padL,x2:padL+iw,y1:padT+ih,y2:padT+ih,stroke:'var(--axis)','stroke-width':1}));
+  svg.appendChild(el('text',{x:padL+iw/2,y:height-3,'text-anchor':'middle',fill:'var(--muted)',
+    'font-size':opts.compact?9.5:10.5,'font-family':'var(--body)'},'mean runtime per pair (ms, log)'));
+  svg.appendChild(el('text',{x:11,y:padT+ih/2,'text-anchor':'middle',fill:'var(--muted)',
+    'font-size':opts.compact?9.5:10.5,'font-family':'var(--body)',
+    transform:'rotate(-90 11 '+(padT+ih/2)+')'},'pose mAA@10°'));
+
+  // lines
+  series.forEach(function(s){
+    var d=s.pts.map(function(p,i){return (i?'L':'M')+X(p.x).toFixed(1)+' '+Y(p.y).toFixed(1);}).join(' ');
+    svg.appendChild(el('path',{d:d,fill:'none',stroke:s.dev.color,'stroke-width':2,
+      'stroke-linejoin':'round','stroke-linecap':'round'}));
+  });
+  // markers + hit areas
+  series.forEach(function(s){
+    s.pts.forEach(function(p){
+      svg.appendChild(el('circle',{cx:X(p.x),cy:Y(p.y),r:opts.compact?3.6:4.4,
+        fill:s.dev.color,stroke:'var(--surface)','stroke-width':2}));
+      var hit=el('circle',{cx:X(p.x),cy:Y(p.y),r:12,fill:'transparent',
+        tabindex:'0',role:'img','aria-label':s.dev.label+', '+p.it+' iterations, '+
+          fmtMs(p.x)+' milliseconds, '+fmtA(p.y)+' mAA'});
+      hit.style.cursor='crosshair';
+      var rowsFn=function(){return [
+        {name:'runtime', value:fmtMs(p.x)+' ms', color:s.dev.color},
+        {name:'mAA@10°', value:fmtA(p.y), color:null},
+        {name:'mAA@5°',  value:fmtA(p.r.pose_mAA_5), color:null}
+      ];};
+      hit.addEventListener('pointerenter',function(e){
+        showTip(e,s.dev.label+' · '+p.it.toLocaleString()+' iters',rowsFn());});
+      hit.addEventListener('pointermove',moveTip);
+      hit.addEventListener('pointerleave',hideTip);
+      hit.addEventListener('focus',function(e){
+        var b=hit.getBoundingClientRect();
+        showTip({clientX:b.left+b.width/2,clientY:b.top},
+          s.dev.label+' · '+p.it.toLocaleString()+' iters',rowsFn());});
+      hit.addEventListener('blur',hideTip);
+      svg.appendChild(hit);
+    });
+  });
+
+  host.textContent='';
+  host.appendChild(svg);
+}
+
+function renderHero(){
+  var host=document.getElementById('hero-chart');
+  var w=Math.max(300,host.clientWidth||360);
+  var series=frontierSeries('RoMa',4096,'scannetpp','kf_reposed');
+  drawFrontier(host,series,w,196,{compact:true,padL:42,padR:14,padB:34,
+    aria:'ScanNet++ calibrated RePoseD frontier'});
+  legend(document.getElementById('hero-legend'),
+    series.map(function(s){return {label:s.dev.short,color:s.dev.color};}));
+}
+
+function renderFrontier(){
+  var host=document.getElementById('frontier-cards');
+  host.textContent='';
+  var any=false;
+  DS.forEach(function(d){
+    var series=frontierSeries(S.matcher,S.n,d.id,S.problem);
+    if(!series.length) return;
+    any=true;
+    var card=mk('div','card');
+    var head=mk('div','card-head');
+    var left=mk('div');
+    left.appendChild(mk('p','card-t',d.name));
+    left.appendChild(mk('p','card-s',
+      PROBBY[S.problem].name+' · '+matcherLabel()+' '+S.n.toLocaleString()+
+      ' · 100 → 5000 iterations (GPU 5000 → 20 000)'));
+    head.appendChild(left);
+    var btn=mk('button','tbtn','Table view'); btn.type='button';
+    head.appendChild(btn);
+    card.appendChild(head);
+
+    var lg=mk('div','legend'); card.appendChild(lg);
+    legend(lg,series.map(function(s){return {label:s.dev.label,color:s.dev.color};}));
+
+    var ch=mk('div','chart'); card.appendChild(ch);
+    var tb=mk('div','tbl'); tb.hidden=true; card.appendChild(tb);
+    btn.addEventListener('click',function(){
+      tb.hidden=!tb.hidden; btn.textContent=tb.hidden?'Table view':'Hide table';
+    });
+    var rows=[];
+    series.forEach(function(s){
+      s.pts.forEach(function(p){
+        rows.push([s.dev.label,p.it.toLocaleString(),fmtMs(p.x),fmtA(p.y),
+          fmtA(p.r.pose_mAA_5),p.r.median_pose_err.toFixed(3)]);
+      });
+    });
+    table(tb,['Backend','Iterations','Runtime (ms)','mAA@10°','mAA@5°','Median err (°)'],rows);
+
+    host.appendChild(card);
+    var w=Math.max(560,ch.clientWidth||760);
+    drawFrontier(ch,series,w,Math.min(300,Math.max(230,w*0.36)),
+      {aria:d.name+' accuracy versus runtime'});
+  });
+  if(!any){
+    var p=mk('div','card'); p.appendChild(mk('p','card-s',
+      'This solver was not run on any dataset in the current selection.'));
+    host.appendChild(p);
+  }
+}
+
+/* =======================================================================
+   Budget panel: what another 15 000 iterations actually costs
+   ======================================================================= */
+function budgetSeries(){
+  var ITERS=[100,200,500,1000,2000,5000,10000,20000];
+  return DEV.map(function(d){
+    var pts=[];
+    ITERS.forEach(function(it){
+      var vs=[],as=[];
+      DS.forEach(function(ds){
+        var r=sel({matcher:S.matcher,n:S.n,dataset:ds.id,problem:S.problem,
+                   device:d.id,iters:it});
+        if(r.length){ vs.push(r[0].mean_runtime); as.push(r[0].pose_mAA_10); }
+      });
+      if(vs.length) pts.push({it:it,x:median(vs),y:median(as)});
+    });
+    return {dev:d,pts:pts};
+  }).filter(function(s){return s.pts.length;});
+}
+
+function renderBudget(){
+  var host=document.getElementById('bud-chart');
+  var series=budgetSeries();
+  document.getElementById('bud-sub').textContent=
+    PROBBY[S.problem].name+' · '+matcherLabel()+' '+S.n.toLocaleString()+
+    ' · median over datasets';
+  legend(document.getElementById('bud-legend'),
+    series.map(function(s){return {label:s.dev.label,color:s.dev.color};}));
+
+  var gpu=null,pl=null;
+  series.forEach(function(s){
+    if(s.dev.id==='fastpose_gpu') gpu=s;
+    if(s.dev.id==='poselib_1c') pl=s;
+  });
+  function at(s,it){
+    if(!s) return null;
+    var m=s.pts.filter(function(p){return p.it===it;});
+    return m.length?m[0]:null;
+  }
+  var g5=at(gpu,5000), g20=at(gpu,20000), p5=at(pl,5000);
+
+  var claims=document.getElementById('bud-claims');
+  claims.textContent='';
+  var tiles=[];
+  if(g5){
+    tiles.push({l:'5000 iterations on CUDA',v:fmtMs(g5.x)+' ms',
+      n:'mean per pair, median over datasets — the working default',c:'var(--s3)'});
+  }
+  if(g5&&p5){
+    tiles.push({l:'Against PoseLib',v:fmtX(p5.x/g5.x),
+      n:'same solver, same 5000 iterations, one CPU core',c:'var(--s1)'});
+  }
+  if(g5&&g20){
+    tiles.push({l:'Headroom to 20 000',v:'+'+(g20.x-g5.x).toFixed(0)+' ms',
+      n:'four times the budget for '+(g20.x/g5.x).toFixed(1)+
+        '× the time; it moves mAA@10° by '+
+        (g20.y-g5.y>=0?'+':'')+(g20.y-g5.y).toFixed(2)+' here, and by less than a point '+
+        'either way across the benchmark',c:null});
+  }
+  tiles.forEach(function(t){
+    var k=mk('div','kpi');
+    var lab=mk('div','kpi-l');
+    if(t.c){ var dt=mk('span','dot'); dt.style.background=t.c; lab.appendChild(dt); }
+    lab.appendChild(document.createTextNode(t.l));
+    k.appendChild(lab);
+    k.appendChild(mk('div','kpi-v',t.v));
+    k.appendChild(mk('div','kpi-n',t.n));
+    claims.appendChild(k);
+  });
+
+  var w=Math.max(560,host.clientWidth||760);
+  var h=Math.min(320,Math.max(250,w*0.38));
+  var padL=56,padR=22,padT=22,padB=44;
+  var iw=w-padL-padR, ih=h-padT-padB;
+
+  var xs=[],ys=[];
+  series.forEach(function(s){s.pts.forEach(function(p){xs.push(p.it);ys.push(p.x);});});
+  var lx0=Math.log10(Math.min.apply(null,xs)), lx1=Math.log10(Math.max.apply(null,xs));
+  var y0=Math.pow(10,Math.floor(Math.log10(Math.min.apply(null,ys))));
+  var y1=Math.pow(10,Math.ceil(Math.log10(Math.max.apply(null,ys))));
+  var ly0=Math.log10(y0), ly1=Math.log10(y1);
+  function X(v){return padL+(Math.log10(v)-lx0)/(lx1-lx0)*iw;}
+  function Y(v){return padT+ih-(Math.log10(v)-ly0)/(ly1-ly0)*ih;}
+
+  var svg=el('svg',{width:w,height:h,viewBox:'0 0 '+w+' '+h,role:'img',
+    'aria-label':'runtime as the iteration budget grows'});
+
+  logTicks(y0,y1).forEach(function(v){
+    svg.appendChild(el('line',{x1:padL,x2:padL+iw,y1:Y(v),y2:Y(v),
+      stroke:'var(--grid)','stroke-width':1}));
+    svg.appendChild(el('text',{x:padL-8,y:Y(v)+3.5,'text-anchor':'end',fill:'var(--muted)',
+      'font-size':10.5,'font-family':'var(--mono)'},
+      v>=1000?(v/1000)+'k':String(v)));
+  });
+  [100,1000,10000,20000].forEach(function(v){
+    if(v<Math.pow(10,lx0)*0.999||v>Math.pow(10,lx1)*1.001) return;
+    svg.appendChild(el('line',{x1:X(v),x2:X(v),y1:padT,y2:padT+ih,
+      stroke:'var(--grid)','stroke-width':1}));
+    svg.appendChild(el('text',{x:X(v),y:padT+ih+16,'text-anchor':'middle',fill:'var(--muted)',
+      'font-size':10.5,'font-family':'var(--mono)'},
+      v>=1000?(v/1000)+'k':String(v)));
+  });
+  svg.appendChild(el('line',{x1:padL,x2:padL+iw,y1:padT+ih,y2:padT+ih,
+    stroke:'var(--axis)','stroke-width':1}));
+  svg.appendChild(el('text',{x:padL+iw/2,y:h-5,'text-anchor':'middle',fill:'var(--muted)',
+    'font-size':11,'font-family':'var(--body)'},'RANSAC iterations (log)'));
+  svg.appendChild(el('text',{x:13,y:padT+ih/2,'text-anchor':'middle',fill:'var(--muted)',
+    'font-size':11,'font-family':'var(--body)',
+    transform:'rotate(-90 13 '+(padT+ih/2)+')'},'mean runtime per pair (ms, log)'));
+
+  series.forEach(function(s){
+    var d=s.pts.map(function(p,i){return (i?'L':'M')+X(p.it).toFixed(1)+' '+Y(p.x).toFixed(1);}).join(' ');
+    svg.appendChild(el('path',{d:d,fill:'none',stroke:s.dev.color,'stroke-width':2,
+      'stroke-linejoin':'round','stroke-linecap':'round'}));
+  });
+  series.forEach(function(s){
+    s.pts.forEach(function(p){
+      svg.appendChild(el('circle',{cx:X(p.it),cy:Y(p.x),r:4.4,fill:s.dev.color,
+        stroke:'var(--surface)','stroke-width':2}));
+      var hit=el('circle',{cx:X(p.it),cy:Y(p.x),r:13,fill:'transparent',tabindex:'0',
+        role:'img','aria-label':s.dev.label+' at '+p.it+' iterations, '+fmtMs(p.x)+
+          ' milliseconds, '+fmtA(p.y)+' mAA'});
+      hit.style.cursor='crosshair';
+      var rows=[{name:'runtime',value:fmtMs(p.x)+' ms',color:s.dev.color},
+                {name:'mAA@10°',value:fmtA(p.y),color:null}];
+      var title=s.dev.label+' · '+p.it.toLocaleString()+' iters';
+      hit.addEventListener('pointerenter',function(e){showTip(e,title,rows);});
+      hit.addEventListener('pointermove',moveTip);
+      hit.addEventListener('pointerleave',hideTip);
+      hit.addEventListener('focus',function(){
+        var b=hit.getBoundingClientRect();
+        showTip({clientX:b.left+b.width/2,clientY:b.top},title,rows);});
+      hit.addEventListener('blur',hideTip);
+      svg.appendChild(hit);
+    });
+  });
+
+  if(g5){
+    svg.appendChild(el('circle',{cx:X(5000),cy:Y(g5.x),r:8,fill:'none',
+      stroke:'var(--s3)','stroke-width':1.5,'stroke-opacity':0.5}));
+    svg.appendChild(el('text',{x:X(5000),y:Y(g5.x)-17,'text-anchor':'middle',
+      fill:'var(--ink)','font-size':11.5,'font-family':'var(--display)','font-weight':600},
+      '5000 iters · '+fmtMs(g5.x)+' ms'));
+  }
+
+  host.textContent=''; host.appendChild(svg);
+
+  var rows=[];
+  series.forEach(function(s){
+    s.pts.forEach(function(p){
+      rows.push([s.dev.label,p.it.toLocaleString(),fmtMs(p.x),fmtA(p.y)]);
+    });
+  });
+  table(document.getElementById('bud-table'),
+    ['Backend','Iterations','Runtime (ms)','mAA@10°'],rows);
+}
+
+/* =======================================================================
+   Speed-up dot plot (log scale, ratios)
+   ======================================================================= */
+function speedupData(){
+  return PROB.map(function(p){
+    var out={prob:p,vals:{}};
+    ['fastpose_1c','fastpose_4c','fastpose_gpu'].forEach(function(dev){
+      var rs=[];
+      DS.forEach(function(d){
+        var f=sel({matcher:S.matcher,n:S.n,dataset:d.id,problem:p.id,iters:5000,device:dev});
+        var b=sel({matcher:S.matcher,n:S.n,dataset:d.id,problem:p.id,iters:5000,device:'poselib_1c'});
+        if(f.length&&b.length) rs.push(b[0].mean_runtime/f[0].mean_runtime);
+      });
+      if(rs.length) out.vals[dev]=median(rs);
+    });
+    return out;
+  }).filter(function(o){return Object.keys(o.vals).length;});
+}
+
+function renderSpeedup(){
+  var host=document.getElementById('sp-chart');
+  var data=speedupData();
+  document.getElementById('sp-sub').textContent=
+    matcherLabel()+' '+S.n.toLocaleString()+' · median over datasets · higher is faster';
+  legend(document.getElementById('sp-legend'),
+    [DEVBY.fastpose_1c,DEVBY.fastpose_4c,DEVBY.fastpose_gpu].map(function(d){
+      return {label:d.label,color:d.color};}),true);
+
+  var w=Math.max(600,host.clientWidth||760);
+  var padL=Math.min(214,Math.max(150,w*0.27)), padR=68, padT=10, padB=42;
+  var rowH=42, h=padT+padB+data.length*rowH;
+  var iw=Math.max(80,w-padL-padR), ih=data.length*rowH;
+
+  var maxv=1; data.forEach(function(o){for(var k in o.vals) maxv=Math.max(maxv,o.vals[k]);});
+  var x0=0.9, x1=Math.pow(10,Math.ceil(Math.log10(maxv)*2)/2);
+  var l0=Math.log10(x0), l1=Math.log10(x1);
+  var X=function(v){return padL+(Math.log10(v)-l0)/(l1-l0)*iw;};
+
+  var svg=el('svg',{width:w,height:h,viewBox:'0 0 '+w+' '+h,role:'img',
+    'aria-label':'speed-up over PoseLib by solver'});
+
+  logTicks(1,x1).forEach(function(v){
+    svg.appendChild(el('line',{x1:X(v),x2:X(v),y1:padT,y2:padT+ih,
+      stroke:v===1?'var(--axis)':'var(--grid)','stroke-width':1}));
+    svg.appendChild(el('text',{x:X(v),y:padT+ih+16,'text-anchor':'middle',fill:'var(--muted)',
+      'font-size':10.5,'font-family':'var(--mono)'},v+'×'));
+  });
+  svg.appendChild(el('text',{x:X(1),y:padT+ih+30,'text-anchor':'start',fill:'var(--muted)',
+    'font-size':11,'font-family':'var(--body)'},'← parity with PoseLib'));
+
+  data.forEach(function(o,i){
+    var cy=padT+i*rowH+rowH/2;
+    var isSel=o.prob.id===S.problem;
+    if(isSel){
+      svg.appendChild(el('rect',{x:4,y:padT+i*rowH+3,width:w-8,height:rowH-6,rx:3,
+        fill:'var(--accent-soft)'}));
+    }
+    var parts=o.prob.name.split(' · ');
+    svg.appendChild(el('text',{x:padL-14,y:cy-2,'text-anchor':'end',
+      fill:isSel?'var(--ink)':'var(--ink-2)','font-size':12.5,'font-family':'var(--body)',
+      'font-weight':isSel?600:400},parts[0]));
+    svg.appendChild(el('text',{x:padL-14,y:cy+11,'text-anchor':'end',
+      fill:'var(--muted)','font-size':10.5,'font-family':'var(--body)'},parts[1]));
+
+    var vs=['fastpose_1c','fastpose_4c','fastpose_gpu'].filter(function(k){return o.vals[k];});
+    var lo=Math.min.apply(null,vs.map(function(k){return o.vals[k];}));
+    var hi=Math.max.apply(null,vs.map(function(k){return o.vals[k];}));
+    svg.appendChild(el('line',{x1:X(lo),x2:X(hi),y1:cy,y2:cy,stroke:'var(--base-soft)','stroke-width':3,
+      'stroke-linecap':'round'}));
+
+    vs.forEach(function(k){
+      var v=o.vals[k], d=DEVBY[k];
+      svg.appendChild(el('circle',{cx:X(v),cy:cy,r:6,fill:d.color,
+        stroke:'var(--surface)','stroke-width':2}));
+      var hit=el('circle',{cx:X(v),cy:cy,r:13,fill:'transparent',tabindex:'0',role:'img',
+        'aria-label':o.prob.name+', '+d.label+', '+fmtX(v)+' faster than PoseLib'});
+      hit.style.cursor='pointer';
+      var rows=vs.map(function(kk){
+        return {name:DEVBY[kk].short,value:fmtX(o.vals[kk]),color:DEVBY[kk].color};});
+      hit.addEventListener('pointerenter',function(e){showTip(e,o.prob.name,rows);});
+      hit.addEventListener('pointermove',moveTip);
+      hit.addEventListener('pointerleave',hideTip);
+      hit.addEventListener('focus',function(){
+        var b=hit.getBoundingClientRect();
+        showTip({clientX:b.left+b.width/2,clientY:b.top},o.prob.name,rows);});
+      hit.addEventListener('blur',hideTip);
+      svg.appendChild(hit);
+    });
+    // direct-label the fastest of the row, at the right edge
+    svg.appendChild(el('text',{x:X(hi)+13,y:cy+4,fill:'var(--ink)','font-size':12,
+      'font-family':'var(--mono)','font-weight':600},fmtX(hi)));
+  });
+
+  host.textContent=''; host.appendChild(svg);
+
+  table(document.getElementById('sp-table'),
+    ['Solver','1 core','4 cores','GPU'],
+    data.map(function(o){
+      return [o.prob.name,
+        o.vals.fastpose_1c?fmtX(o.vals.fastpose_1c):'—',
+        o.vals.fastpose_4c?fmtX(o.vals.fastpose_4c):'—',
+        o.vals.fastpose_gpu?fmtX(o.vals.fastpose_gpu):'—'];
+    }));
+}
+
+/* =======================================================================
+   KPI tiles
+   ======================================================================= */
+function renderKpis(){
+  var host=document.getElementById('kpis');
+  host.textContent='';
+
+  // speed-up spread across every solver and dataset in the current selection
+  function spread(dev){
+    var rs=[];
+    PROB.forEach(function(pr){
+      DS.forEach(function(d){
+        var f=sel({matcher:S.matcher,n:S.n,dataset:d.id,problem:pr.id,iters:5000,device:dev});
+        var b=sel({matcher:S.matcher,n:S.n,dataset:d.id,problem:pr.id,iters:5000,
+                   device:'poselib_1c'});
+        if(f.length&&b.length) rs.push(b[0].mean_runtime/f[0].mean_runtime);
+      });
+    });
+    if(!rs.length) return null;
+    return {lo:Math.min.apply(null,rs),hi:Math.max.apply(null,rs),k:rs.length};
+  }
+
+  var deltas=[];
+  PROB.forEach(function(pr){
+    DS.forEach(function(d){
+      sel({matcher:S.matcher,n:S.n,dataset:d.id,problem:pr.id,
+           device:'fastpose_1c'}).forEach(function(fr){
+        var b=sel({matcher:S.matcher,n:S.n,dataset:d.id,problem:pr.id,
+                   device:'poselib_1c',iters:fr.iters});
+        if(b.length) deltas.push(fr.pose_mAA_10-b[0].pose_mAA_10);
+      });
+    });
+  });
+
+  function num(v){ return v>=10 ? v.toFixed(0) : v.toFixed(1); }
+  function rangeX(r){ return r ? num(r.lo)+'–'+num(r.hi)+'×' : '—'; }
+  function signed(v){ return (v>=0?'+':'−')+Math.abs(v).toFixed(1); }
+
+  var one=spread('fastpose_1c'), four=spread('fastpose_4c'), gpu=spread('fastpose_gpu');
+  var tiles=[
+    {l:'One core',   v:rangeX(one),
+     n:one?'full range over '+one.k+' solver × dataset runs':'', c:'var(--s1)'},
+    {l:'Four cores', v:rangeX(four),
+     n:four?'same process, pinned to 4 CPUs':'', c:'var(--s2)'},
+    {l:'GPU',        v:rangeX(gpu),
+     n:gpu?'CUDA backend, whole batch on device':'', c:'var(--s3)'}
+  ];
+  if(deltas.length){
+    tiles.push({l:'Accuracy',
+      v:signed(Math.min.apply(null,deltas))+' to '+signed(Math.max.apply(null,deltas)),
+      n:'Δ mAA@10° vs PoseLib over all '+deltas.length+' matched runs',c:null});
+  }
+
+  tiles.forEach(function(t){
+    var k=mk('div','kpi');
+    var txt=mk('div','kpi-txt');
+    var lab=mk('div','kpi-l');
+    if(t.c){ var dt=mk('span','dot'); dt.style.background=t.c; lab.appendChild(dt); }
+    lab.appendChild(document.createTextNode(t.l));
+    txt.appendChild(lab);
+    if(t.n) txt.appendChild(mk('div','kpi-n',t.n));
+    k.appendChild(txt);
+    k.appendChild(mk('div','kpi-v',t.v));
+    host.appendChild(k);
+  });
+}
+
+/* =======================================================================
+   Controls
+   ======================================================================= */
+function syncSeg(id,val){
+  document.querySelectorAll('#'+id+' button').forEach(function(b){
+    b.setAttribute('aria-pressed', String(b.getAttribute('data-v')===String(val)));
+  });
+}
+function availableN(){
+  var s={};
+  ROWS.forEach(function(r){ if(r.matcher===S.matcher) s[r.n]=1; });
+  return Object.keys(s).map(Number).sort(function(a,b){return a-b;});
+}
+function renderAll(){
+  syncSeg('f-matcher',S.matcher);
+  syncSeg('f-n',S.n);
+  document.getElementById('lab-n').textContent =
+    S.matcher==='RoMa' ? 'Sampled matches' : 'Max keypoints';
+  renderKpis(); renderFrontier(); renderBudget(); renderSpeedup();
+}
+
+var psel=document.getElementById('f-problem');
+PROB.forEach(function(p){
+  var o=document.createElement('option');
+  o.value=p.id; o.textContent=p.name;
+  psel.appendChild(o);
+});
+psel.value=S.problem;
+psel.addEventListener('change',function(){ S.problem=psel.value; renderAll(); });
+
+document.querySelectorAll('#f-matcher button').forEach(function(b){
+  b.addEventListener('click',function(){
+    S.matcher=b.getAttribute('data-v');
+    var av=availableN();
+    if(av.indexOf(S.n)<0) S.n=av[Math.min(1,av.length-1)];
+    renderAll();
+  });
+});
+document.querySelectorAll('#f-n button').forEach(function(b){
+  b.addEventListener('click',function(){ S.n=Number(b.getAttribute('data-v')); renderAll(); });
+});
+
+var rt=null;
+window.addEventListener('resize',function(){
+  clearTimeout(rt);
+  rt=setTimeout(function(){ renderHero(); renderAll(); },160);
+});
+
+renderHero();
+renderAll();
+})();
+</script>
