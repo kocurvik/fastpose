@@ -31,6 +31,7 @@
 }
 
 *{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
 body{
   background:var(--page);
   color:var(--ink);
@@ -133,6 +134,23 @@ select{
 .kpis-stack .kpi-v{font-size:clamp(19px,2.3vw,25px);white-space:nowrap;flex:none}
 .kpis-stack .kpi-n{font-size:12px}
 .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none;margin-right:6px;vertical-align:baseline}
+
+@media (max-width:600px){
+  .panel-controls{gap:14px 16px;padding:14px}
+  .fgroup{flex-direction:column;align-items:stretch;gap:6px;width:100%}
+  .seg{width:100%}
+  .seg button{flex:1 1 0;text-align:center;padding:7px 6px}
+  select{width:100%}
+  .panel-scope{margin:0;order:99}
+  .kpis-stack .kpi{padding:12px 14px}
+  .install-cmd{padding:16px 14px}
+  .install .code{padding:16px 14px;font-size:11.5px;line-height:1.55}
+  .install-note{padding:14px}
+  .bib{padding:14px;font-size:11.5px}
+  .refgroup{padding:16px 14px}
+  .note{padding:14px}
+  .card-head{gap:8px}
+}
 
 /* ---------- sections ---------- */
 section{padding:clamp(40px,6vw,58px) 0 0}
@@ -638,6 +656,10 @@ function moveTip(evt){
 }
 function hideTip(){ TIP.style.opacity='0'; }
 document.addEventListener('scroll',hideTip,true);
+// on touch the pointer never leaves, so dismiss the readout on the next tap
+document.addEventListener('touchstart',function(e){
+  if(!e.target.closest||!e.target.closest('svg')) hideTip();
+},{passive:true});
 
 /* ---------- legend ---------- */
 function legend(host,items,square){
@@ -714,8 +736,8 @@ function frontierSeries(matcher,n,dataset,problem){
 
 function drawFrontier(host,series,width,height,opts){
   opts=opts||{};
-  var padL=opts.padL||46, padR=opts.padR||18,
-      padT=opts.padT||14, padB=opts.padB||34;
+  var padL=opts.padL||(opts.compact?38:46), padR=opts.padR||(opts.compact?12:18),
+      padT=opts.padT||14, padB=opts.padB||(opts.compact?32:34);
   var iw=Math.max(60,width-padL-padR), ih=Math.max(50,height-padT-padB);
 
   var xs=[],ys=[];
@@ -742,8 +764,14 @@ function drawFrontier(host,series,width,height,opts){
     svg.appendChild(el('text',{x:padL-8,y:Y(v)+3.5,'text-anchor':'end',fill:'var(--muted)',
       'font-size':opts.compact?9.5:10.5,'font-family':'var(--mono)'},v.toFixed(1)));
   });
-  // x axis
+  // x axis - on a narrow chart keep decades only, so labels never collide
   var xt=logTicks(x0,x1);
+  if(opts.compact){
+    var decades=xt.filter(function(v){
+      return Math.abs(Math.log10(v)-Math.round(Math.log10(v)))<1e-9;
+    });
+    if(decades.length>=2) xt=decades;
+  }
   xt.forEach(function(v){
     svg.appendChild(el('line',{x1:X(v),x2:X(v),y1:padT,y2:padT+ih,stroke:'var(--grid)','stroke-width':1}));
     svg.appendChild(el('text',{x:X(v),y:padT+ih+15,'text-anchor':'middle',fill:'var(--muted)',
@@ -796,9 +824,10 @@ function drawFrontier(host,series,width,height,opts){
 
 function renderHero(){
   var host=document.getElementById('hero-chart');
-  var w=Math.max(300,host.clientWidth||360);
+  var w=Math.max(240,host.clientWidth||360);
   var series=frontierSeries('RoMa',4096,'scannetpp','kf_reposed');
-  drawFrontier(host,series,w,196,{compact:true,padL:42,padR:14,padB:34,
+  drawFrontier(host,series,w,Math.max(180,Math.min(210,w*0.55)),
+    {compact:true,padL:38,padR:12,padB:32,
     aria:'ScanNet++ calibrated RePoseD frontier'});
   legend(document.getElementById('hero-legend'),
     series.map(function(s){return {label:s.dev.short,color:s.dev.color};}));
@@ -842,9 +871,12 @@ function renderFrontier(){
     table(tb,['Backend','Iterations','Runtime (ms)','mAA@10°','mAA@5°','Median err (°)'],rows);
 
     host.appendChild(card);
-    var w=Math.max(560,ch.clientWidth||760);
-    drawFrontier(ch,series,w,Math.min(300,Math.max(230,w*0.36)),
-      {aria:d.name+' accuracy versus runtime'});
+    var w=Math.max(280,ch.clientWidth||760);
+    var narrow=w<540;
+    var h=narrow?Math.max(215,Math.min(275,w*0.78))
+                :Math.min(300,Math.max(230,w*0.36));
+    drawFrontier(ch,series,w,h,
+      {compact:narrow,aria:d.name+' accuracy versus runtime'});
   });
   if(!any){
     var p=mk('div','card'); p.appendChild(mk('p','card-s',
@@ -923,9 +955,13 @@ function renderBudget(){
     claims.appendChild(k);
   });
 
-  var w=Math.max(560,host.clientWidth||760);
-  var h=Math.min(320,Math.max(250,w*0.38));
-  var padL=56,padR=22,padT=22,padB=44;
+  var w=Math.max(280,host.clientWidth||760);
+  var narrow=w<540;
+  var h=narrow?Math.max(230,Math.min(285,w*0.80))
+              :Math.min(320,Math.max(250,w*0.38));
+  var fs=narrow?9.5:10.5, fsAx=narrow?10:11;
+  var padL=narrow?40:56, padR=narrow?14:22,
+      padT=narrow?18:22, padB=narrow?40:44;
   var iw=w-padL-padR, ih=h-padT-padB;
 
   var xs=[],ys=[];
@@ -944,23 +980,23 @@ function renderBudget(){
     svg.appendChild(el('line',{x1:padL,x2:padL+iw,y1:Y(v),y2:Y(v),
       stroke:'var(--grid)','stroke-width':1}));
     svg.appendChild(el('text',{x:padL-8,y:Y(v)+3.5,'text-anchor':'end',fill:'var(--muted)',
-      'font-size':10.5,'font-family':'var(--mono)'},
+      'font-size':fs,'font-family':'var(--mono)'},
       v>=1000?(v/1000)+'k':String(v)));
   });
-  [100,1000,10000,20000].forEach(function(v){
+  (narrow?[100,1000,10000]:[100,1000,10000,20000]).forEach(function(v){
     if(v<Math.pow(10,lx0)*0.999||v>Math.pow(10,lx1)*1.001) return;
     svg.appendChild(el('line',{x1:X(v),x2:X(v),y1:padT,y2:padT+ih,
       stroke:'var(--grid)','stroke-width':1}));
     svg.appendChild(el('text',{x:X(v),y:padT+ih+16,'text-anchor':'middle',fill:'var(--muted)',
-      'font-size':10.5,'font-family':'var(--mono)'},
+      'font-size':fs,'font-family':'var(--mono)'},
       v>=1000?(v/1000)+'k':String(v)));
   });
   svg.appendChild(el('line',{x1:padL,x2:padL+iw,y1:padT+ih,y2:padT+ih,
     stroke:'var(--axis)','stroke-width':1}));
   svg.appendChild(el('text',{x:padL+iw/2,y:h-5,'text-anchor':'middle',fill:'var(--muted)',
-    'font-size':11,'font-family':'var(--body)'},'RANSAC iterations (log)'));
+    'font-size':fsAx,'font-family':'var(--body)'},'RANSAC iterations (log)'));
   svg.appendChild(el('text',{x:13,y:padT+ih/2,'text-anchor':'middle',fill:'var(--muted)',
-    'font-size':11,'font-family':'var(--body)',
+    'font-size':fsAx,'font-family':'var(--body)',
     transform:'rotate(-90 13 '+(padT+ih/2)+')'},'mean runtime per pair (ms, log)'));
 
   series.forEach(function(s){
@@ -993,9 +1029,12 @@ function renderBudget(){
   if(g5){
     svg.appendChild(el('circle',{cx:X(5000),cy:Y(g5.x),r:8,fill:'none',
       stroke:'var(--s3)','stroke-width':1.5,'stroke-opacity':0.5}));
-    svg.appendChild(el('text',{x:X(5000),y:Y(g5.x)-17,'text-anchor':'middle',
-      fill:'var(--ink)','font-size':11.5,'font-family':'var(--display)','font-weight':600},
-      '5000 iters · '+fmtMs(g5.x)+' ms'));
+    var lblTxt='5000 iters · '+fmtMs(g5.x)+' ms';
+    var lblHalf=lblTxt.length*(narrow?3.0:3.4)+2;
+    var lblX=Math.min(Math.max(X(5000),padL+lblHalf),padL+iw-lblHalf);
+    svg.appendChild(el('text',{x:lblX,y:Y(g5.x)-17,'text-anchor':'middle',
+      fill:'var(--ink)','font-size':narrow?10.5:11.5,'font-family':'var(--display)',
+      'font-weight':600},lblTxt));
   }
 
   host.textContent=''; host.appendChild(svg);
@@ -1038,9 +1077,13 @@ function renderSpeedup(){
     [DEVBY.fastpose_1c,DEVBY.fastpose_4c,DEVBY.fastpose_gpu].map(function(d){
       return {label:d.label,color:d.color};}),true);
 
-  var w=Math.max(600,host.clientWidth||760);
-  var padL=Math.min(214,Math.max(150,w*0.27)), padR=68, padT=10, padB=42;
-  var rowH=42, h=padT+padB+data.length*rowH;
+  var w=Math.max(280,host.clientWidth||760);
+  // below this the left name gutter would squeeze the scale to nothing, so the
+  // names move onto their own line above each row
+  var stacked=w<560;
+  var padL=stacked?12:Math.min(214,Math.max(150,w*0.27));
+  var padR=stacked?46:68, padT=stacked?8:10, padB=42;
+  var rowH=stacked?62:42, h=padT+padB+data.length*rowH;
   var iw=Math.max(80,w-padL-padR), ih=data.length*rowH;
 
   var maxv=1; data.forEach(function(o){for(var k in o.vals) maxv=Math.max(maxv,o.vals[k]);});
@@ -1055,24 +1098,30 @@ function renderSpeedup(){
     svg.appendChild(el('line',{x1:X(v),x2:X(v),y1:padT,y2:padT+ih,
       stroke:v===1?'var(--axis)':'var(--grid)','stroke-width':1}));
     svg.appendChild(el('text',{x:X(v),y:padT+ih+16,'text-anchor':'middle',fill:'var(--muted)',
-      'font-size':10.5,'font-family':'var(--mono)'},v+'×'));
+      'font-size':stacked?9.5:10.5,'font-family':'var(--mono)'},v+'×'));
   });
   svg.appendChild(el('text',{x:X(1),y:padT+ih+30,'text-anchor':'start',fill:'var(--muted)',
     'font-size':11,'font-family':'var(--body)'},'← parity with PoseLib'));
 
   data.forEach(function(o,i){
-    var cy=padT+i*rowH+rowH/2;
+    var cy=padT+i*rowH+(stacked?rowH*0.68:rowH/2);
     var isSel=o.prob.id===S.problem;
     if(isSel){
       svg.appendChild(el('rect',{x:4,y:padT+i*rowH+3,width:w-8,height:rowH-6,rx:3,
         fill:'var(--accent-soft)'}));
     }
     var parts=o.prob.name.split(' · ');
-    svg.appendChild(el('text',{x:padL-14,y:cy-2,'text-anchor':'end',
-      fill:isSel?'var(--ink)':'var(--ink-2)','font-size':12.5,'font-family':'var(--body)',
-      'font-weight':isSel?600:400},parts[0]));
-    svg.appendChild(el('text',{x:padL-14,y:cy+11,'text-anchor':'end',
-      fill:'var(--muted)','font-size':10.5,'font-family':'var(--body)'},parts[1]));
+    if(stacked){
+      svg.appendChild(el('text',{x:padL,y:padT+i*rowH+16,'text-anchor':'start',
+        fill:isSel?'var(--ink)':'var(--ink-2)','font-size':12,'font-family':'var(--body)',
+        'font-weight':isSel?600:400},parts[0]+' · '+parts[1]));
+    }else{
+      svg.appendChild(el('text',{x:padL-14,y:cy-2,'text-anchor':'end',
+        fill:isSel?'var(--ink)':'var(--ink-2)','font-size':12.5,'font-family':'var(--body)',
+        'font-weight':isSel?600:400},parts[0]));
+      svg.appendChild(el('text',{x:padL-14,y:cy+11,'text-anchor':'end',
+        fill:'var(--muted)','font-size':10.5,'font-family':'var(--body)'},parts[1]));
+    }
 
     var vs=['fastpose_1c','fastpose_4c','fastpose_gpu'].filter(function(k){return o.vals[k];});
     var lo=Math.min.apply(null,vs.map(function(k){return o.vals[k];}));
@@ -1099,8 +1148,8 @@ function renderSpeedup(){
       svg.appendChild(hit);
     });
     // direct-label the fastest of the row, at the right edge
-    svg.appendChild(el('text',{x:X(hi)+13,y:cy+4,fill:'var(--ink)','font-size':12,
-      'font-family':'var(--mono)','font-weight':600},fmtX(hi)));
+    svg.appendChild(el('text',{x:X(hi)+13,y:cy+4,fill:'var(--ink)',
+      'font-size':stacked?11:12,'font-family':'var(--mono)','font-weight':600},fmtX(hi)));
   });
 
   host.textContent=''; host.appendChild(svg);
