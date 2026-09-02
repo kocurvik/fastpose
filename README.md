@@ -10,8 +10,10 @@ monocular-depth-assisted relative pose — all built on one
 LO-RANSAC engine and benchmarked against PoseLib (C++). Every problem also has
 a [CUDA backend](#gpu-cuda) that runs the whole estimate batched on the GPU.
 
-See [TESTS.md](TESTS.md) for the tests and for the synthetic benchmarks that
-compare against PoseLib. Real-data numbers are coming later.
+See the [project page](https://kocurvik.github.io/fastpose/) for the real-data
+benchmark against PoseLib — ETH3D, ScanNet++ and PhotoTourism, over RoMa v2 and
+LoMa correspondences — and [TESTS.md](TESTS.md) for the tests and the synthetic
+benchmarks.
 
 ## Install
 
