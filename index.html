@@ -231,6 +231,15 @@ tbody tr:not(:last-child) td{border-bottom:1px solid var(--rule)}
 code{font-family:var(--mono);font-size:.88em;background:var(--surface-2);padding:1px 5px;border-radius:3px;color:var(--ink)}
 .flag{border-left:3px solid var(--s2);padding-left:14px}
 
+.bibcard{padding-bottom:clamp(14px,2vw,20px)}
+.bib-head{display:flex;justify-content:flex-end}
+.bib{
+  background:var(--surface-3);border:1px solid var(--rule);border-radius:3px;
+  margin:10px 0 0;padding:16px 18px;overflow-x:auto;
+  font-family:var(--mono);font-size:12.5px;line-height:1.6;color:var(--ink-2);
+  white-space:pre;
+}
+.bib::selection,.bib *::selection{background:var(--accent-soft);color:var(--ink)}
 .reflist{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));
   gap:1px;background:var(--rule);border:1px solid var(--rule);border-radius:4px;overflow:hidden}
 .refgroup{background:var(--surface);padding:18px 20px 20px;min-width:0}
@@ -468,6 +477,24 @@ R, t = model[<span class="s">'R'</span>], model[<span class="s">'t'</span>]</pre
   </div>
 </section>
 
+<section id="cite">
+  <div class="sec-head">
+    <h2>Citing fastpose</h2>
+    <p>If you found fastpose useful please consider citing:</p>
+  </div>
+  <div class="card bibcard">
+    <div class="bib-head">
+      <button class="tbtn" type="button" id="bib-copy">Copy</button>
+    </div>
+    <pre class="bib" id="bib">@misc{fastpose,
+  title  = {{fastpose -- A Fast Python Backend for Robust Camera Pose Estimation}},
+  author = {Kocur, Viktor},
+  url    = {https://github.com/kocurvik/fastpose},
+  year   = {2026}
+}</pre>
+  </div>
+</section>
+
 <section id="refs">
   <div class="sec-head">
     <h2>References</h2>
@@ -668,6 +695,32 @@ function table(host,cols,rows){
   });
   t.appendChild(tb); host.appendChild(t);
 }
+var bibBtn=document.getElementById('bib-copy');
+if(bibBtn){
+  bibBtn.addEventListener('click',function(){
+    var pre=document.getElementById('bib');
+    function done(msg){
+      bibBtn.textContent=msg;
+      setTimeout(function(){ bibBtn.textContent='Copy'; },2000);
+    }
+    function selectIt(){
+      var r=document.createRange();
+      r.selectNodeContents(pre);
+      var sel=window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(pre.textContent).then(
+        function(){ done('Copied'); },
+        function(){ selectIt(); done('Selected — press Ctrl+C'); });
+    }else{
+      selectIt();
+      done('Selected — press Ctrl+C');
+    }
+  });
+}
+
 document.querySelectorAll('[data-table]').forEach(function(b){
   b.addEventListener('click',function(){
     var t=document.getElementById(b.getAttribute('data-table'));
