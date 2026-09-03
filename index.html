@@ -301,9 +301,10 @@ footer a{color:var(--ink-2)}
   </p>
   <h1>PoseLib accuracy, <span class="lift">a fraction of the runtime</span>.</h1>
   <p class="deck">
-    fastpose is a numba-compiled LO-RANSAC engine for robust relative pose. Against
-    PoseLib&rsquo;s C++ implementation on the same correspondences, budget and error thresholds,
-    it lands the same poses &mdash; a median difference of a few hundredths of an mAA point &mdash;
+    fastpose is a numba-compiled LO-RANSAC engine for camera pose estimation. It includes estimators for calibred/uncalibrated relative pose, 
+    relative pose with known depth (RePoseD), homography and fundamental matrix estimation, and calibrated/uncalibrated absolute pose.
+    Against PoseLib&rsquo;s C++ implementation on the same correspondences, budget and error thresholds,
+    it lands the same relative poses &mdash; a median difference of a few hundredths of an mAA point &mdash;
     and gets there two to ten times sooner on one CPU core, or one to two orders of magnitude
     sooner on a GPU.
   </p>
